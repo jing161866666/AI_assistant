@@ -17,7 +17,9 @@
     "import:timetable": "tsx scripts/import-timetable.ts",
     "test:schedule": "tsx scripts/test-schedule.ts",
     "test:calendar": "tsx scripts/test-calendar.ts",
-    "test": "npm run test:schedule && npm run test:calendar",
+    "test:bank": "tsx scripts/test-bank.ts",
+    "test:m2": "tsx scripts/test-m2.ts",
+    "test": "npm run test:schedule && npm run test:calendar && npm run test:bank && npm run test:m2",
     "lint": "biome check src scripts web/src",
     "lint:fix": "biome check --write src scripts web/src",
     "format": "biome format --write src scripts web/src",
@@ -33,6 +35,7 @@
     "build:web": "npm --prefix web run build",
     "dev:web": "npm --prefix web run dev",
     "start": "npm run build:web && tsx src/server.ts",
+    "share": "npm run build:web && tsx scripts/share.ts",
     "dev": "tsx watch src/server.ts"
   },
   "dependencies": {

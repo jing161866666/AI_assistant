@@ -84,6 +84,12 @@ export interface Citation {
   excerpt: string;
 }
 
+export interface BeyondItem {
+  topic: string;
+  chapter_no: number | null;
+  why: string;
+}
+
 export interface AskResponse {
   ok: boolean;
   answer: string;
@@ -91,7 +97,19 @@ export interface AskResponse {
   model: string;
   ms: number;
   question?: string;
+  beyond?: BeyondItem[];
+  maxChapterNo?: number | null;
 }
+
+export interface BankMatch {
+  qno: string | null;
+  kind: string;
+  score: number;
+  chapter: string;
+  has_answer: boolean;
+}
+
+export type SolveSource = "bank-answer" | "bank-no-answer" | "model-only";
 
 export interface ReviewView {
   mode: "solve" | "grade";
@@ -103,6 +121,16 @@ export interface ReviewView {
   hints: string[];
   related_kps: string[];
   references: Citation[];
+  /** 只解题时：答案来源（题库有答案 / 题库无答案 / 纯模型） */
+  source?: SolveSource;
+  /** 只解题时：题库匹配到的那道题 */
+  bank?: BankMatch | null;
+  /** 批改时：学生输入被判定成什么（答案 / 过程 / 提问） */
+  input_kind?: "answer" | "process" | "question" | "empty" | "unknown";
+  inputKindLabel?: string;
+  /** M2：越界使用了未学知识点 */
+  beyond?: BeyondItem[];
+  maxChapterNo?: number | null;
   model?: string;
   ms?: number;
 }

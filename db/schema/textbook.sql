@@ -39,7 +39,10 @@ CREATE TABLE IF NOT EXISTS chapter (
   seq         INTEGER NOT NULL,
   title       TEXT NOT NULL,
   page_start  INTEGER,
-  page_end    INTEGER
+  page_end    INTEGER,
+  -- 章节在课程中的顺序号（第9章 → 9）。用于按学习进度过滤检索结果。
+  -- 题库/习题类为 NULL，表示不参与门控（练习题不属于新知识）。
+  chapter_no  INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_chapter_tb   ON chapter(textbook_id);
 CREATE INDEX IF NOT EXISTS idx_chapter_tree ON chapter(parent_id);

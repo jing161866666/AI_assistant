@@ -46,16 +46,29 @@ CREATE TABLE IF NOT EXISTS subject (
 --          / study_time / help_seeking / revision / debug_skill
 CREATE TABLE IF NOT EXISTS habit (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  -- 维度：
+  --   learn_method  学习方式偏好（中文速成网课/中文详细网课/CS英文网课/自学/看参考书/做题）
+  --   code_naming   代码命名偏好（含义 → 用词）
+  --   notation      符号偏好（场景 → 符号）
+  --   error_pattern 反复出现的错误类型
+  --   planning      计划与执行习惯
+  --   help_seeking  求助方式偏好
+  --   attention     注意力/单次时长
   dimension      TEXT NOT NULL,
-  key            TEXT NOT NULL,        -- 如 'boundary_check_skipped'
-  value          TEXT NOT NULL,
+  key            TEXT NOT NULL,        -- 语义键：'阶段:第11章' / '含义:累加器' / '场景:导数'
+  value          TEXT NOT NULL,        -- 具体偏好：'中文详细网课' / 'sum' / 'y'''
+  course_code    TEXT,                 -- 作用域：NULL = 通识，非空 = 只对该科目成立
+  context        TEXT,                 -- 补充场景（章节名、题型、时段）
   confidence     REAL NOT NULL DEFAULT 0.5,   -- 0-1，证据越多越接近 1
   evidence_count INTEGER NOT NULL DEFAULT 0,
   first_seen_at  TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
-  UNIQUE(dimension, key)
+  updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_habit_dim ON habit(dimension);
+-- 同一维度同一语义键在同一科目/场景下只允许一条。
+-- 唯一索引不能写在这里：老库的 habit 表还没有 course_code / context 列，
+-- schema 整体 exec 会先于 ALTER 建索引而报 no such column。
+-- 由 src/db/migrate.ts 在补列之后创建（新库与老库同一条路径）。
 
 -- ── 习惯证据：可回溯，方便学生质问"你凭什么这么说我" ────────
 CREATE TABLE IF NOT EXISTS habit_evidence (
@@ -256,6 +269,25 @@ CREATE TABLE IF NOT EXISTS roadmap_item (
 CREATE INDEX IF NOT EXISTS idx_ri_roadmap ON roadmap_item(roadmap_id);
 CREATE INDEX IF NOT EXISTS idx_ri_date    ON roadmap_item(scheduled_date);
 
+
+-- ── 章节进度：连续过程学习的核心 ────────────────────────────
+-- 与 progress 表的区别：progress 记"知识点掌握度"（离散、由做题推断），
+-- chapter_progress 记"学到第几章"（连续、由用户确认或对话推断）。
+-- 门控检索只认这张表：未学章节的教材正文不进上下文，模型见不到就用不出来。
+CREATE TABLE IF NOT EXISTS chapter_progress (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  course_code   TEXT NOT NULL,
+  chapter_no    INTEGER NOT NULL,     -- 对应 textbook.db 的 chapter.chapter_no
+  chapter_title TEXT,
+  status        TEXT NOT NULL DEFAULT 'learning',
+                  -- not_started / learning / done
+  confidence    REAL NOT NULL DEFAULT 0.6,
+  source        TEXT NOT NULL DEFAULT 'manual',  -- manual / chat / mistake / plan
+  evidence      TEXT,                 -- 依据：哪句话/哪道题推出来的
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(course_code, chapter_no)
+);
+CREATE INDEX IF NOT EXISTS idx_chprog_course ON chapter_progress(course_code);
 -- ── 错题本：error_type 是教师端归因分析的核心字段 ───────────
 CREATE TABLE IF NOT EXISTS mistake (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,

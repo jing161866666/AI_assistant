@@ -1,10 +1,17 @@
 import "dotenv/config";
 import { existsSync } from "node:fs";
+import { networkInterfaces } from "node:os";
 import { resolve } from "node:path";
 import fastifyStatic from "@fastify/static";
 import Fastify from "fastify";
 import { getLearnerDb, inspectTables, listTextbookDbs, paths } from "./db/index.js";
 import { checkEnv } from "./llm/models.js";
+import {
+  advanceTo,
+  type ChapterStatus,
+  listChapterProgress,
+  setChapterProgress,
+} from "./memory/chapter-progress.js";
 import {
   addAttempt,
   deleteMistake,
@@ -13,8 +20,21 @@ import {
   mistakeStats,
   saveMistake,
 } from "./memory/mistakes.js";
-import { ask, errorTypeLabel, review, solve } from "./rag/answer.js";
+import { loadProfile, profilePrompt, profileSummary } from "./memory/profile.js";
+import {
+  ask,
+  CITATION_LIMIT,
+  type Detail,
+  errorTypeLabel,
+  INPUT_KIND_LABEL,
+  review,
+  solve,
+} from "./rag/answer.js";
+import { BANK_TITLE, bankSize } from "./rag/bank.js";
+import { listChapterOutline } from "./rag/chapter-outline.js";
+import { guardProgress } from "./rag/progress-guard.js";
 import { textbookInfo } from "./rag/search.js";
+import { reviewStream, type StreamEvent, solveStream } from "./rag/stream.js";
 import {
   dateOfWeek,
   expandOccurrences,
@@ -181,8 +201,15 @@ app.post<{ Params: { name: string }; Body: unknown }>("/api/tools/:name", async 
 // ───────────────────────── M1：解题 / 改错 / 错题本 ─────────────────────────
 
 const TEXTBOOK_FILE = process.env.TEXTBOOK_FILE ?? "course-phy2.db";
+/** M2：当前主修科目。多科目时由前端勾选后传入，这里给默认值 */
+const COURSE_CODE = process.env.COURSE_CODE ?? "PHY2";
+/** 教材真实章节表：越界检查的依据（属于先验知识，不靠模型猜） */
+const CHAPTER_OUTLINE = listChapterOutline(TEXTBOOK_FILE);
 
-app.get("/api/textbook", async () => textbookInfo(TEXTBOOK_FILE));
+app.get("/api/textbook", async () => ({
+  ...textbookInfo(TEXTBOOK_FILE),
+  bank: { title: BANK_TITLE, questions: bankSize(TEXTBOOK_FILE) },
+}));
 
 /** 图片识别：把图转成可计算文本（公式转 LaTeX、图形转文字描述） */
 app.post<{ Body: { image?: string; kind?: "question" | "answer" } }>(
@@ -199,13 +226,11 @@ app.post<{ Body: { image?: string; kind?: "question" | "answer" } }>(
   },
 );
 
-/** 把多张图依次识别并拼接（一道题常跨两页） */
+/** 把多张图依次识别并拼接（一道题常跨两页）——并行，串行会白等两倍时间 */
 async function imageTexts(images: string[], kind: "question" | "answer"): Promise<string> {
-  const parts: string[] = [];
-  for (const img of images) {
-    const r = await extractImage(db, img, kind);
-    parts.push(r.text);
-  }
+  const parts = await Promise.all(
+    images.map(async (img) => (await extractImage(db, img, kind)).text),
+  );
   return parts.join("\n\n---\n\n");
 }
 
@@ -219,13 +244,27 @@ app.post<{ Body: { question?: string; images?: string[] } }>("/api/ask", async (
     }
     if (!question) return reply.code(400).send({ ok: false, error: "问题或图片至少给一个" });
     if (question.length > 8000) return reply.code(400).send({ ok: false, error: "内容过长" });
-    const r = await ask(TEXTBOOK_FILE, question, 6, images);
+    const prof = loadProfile(db, COURSE_CODE);
+    const r = await ask(TEXTBOOK_FILE, question, CITATION_LIMIT, images, profilePrompt(prof));
+    const beyond = await guardProgress(question, r.answer, prof.maxChapterNo, CHAPTER_OUTLINE);
     db.prepare("INSERT INTO event (type, ref_type, payload) VALUES (?,?,?)").run(
       "ask",
       "textbook",
-      JSON.stringify({ q: question.slice(0, 120), k: r.citations.length, imgs: images.length }),
+      JSON.stringify({
+        q: question.slice(0, 120),
+        k: r.citations.length,
+        imgs: images.length,
+        beyond: beyond.beyond.length,
+      }),
     );
-    return { ok: true, ...r, question };
+    return {
+      ok: true,
+      ...r,
+      question,
+      beyond: beyond.beyond,
+      allWithin: beyond.allWithin,
+      maxChapterNo: prof.maxChapterNo,
+    };
   } catch (e) {
     return reply.code(500).send({ ok: false, error: (e as Error).message });
   }
@@ -257,7 +296,16 @@ app.post<{
     if (!question) return reply.code(400).send({ ok: false, error: "题目不能为空" });
 
     if (!myAnswer) {
-      const r = await solve(TEXTBOOK_FILE, question, 5, images);
+      const prof = loadProfile(db, COURSE_CODE);
+      const r = await solve(
+        TEXTBOOK_FILE,
+        question,
+        CITATION_LIMIT,
+        images,
+        undefined,
+        profilePrompt(prof),
+      );
+      const beyond = await guardProgress(question, r.answer, prof.maxChapterNo, CHAPTER_OUTLINE);
       db.prepare("INSERT INTO event (type, ref_type, payload) VALUES (?,?,?)").run(
         "solve",
         "textbook",
@@ -276,26 +324,139 @@ app.post<{
           hints: [],
           related_kps: [],
           references: r.citations,
+          source: r.source,
+          bank: r.bank,
           model: r.model,
           ms: r.ms,
+          beyond: beyond.beyond,
+          maxChapterNo: prof.maxChapterNo,
         },
         question,
       };
     }
 
-    const r = await review(TEXTBOOK_FILE, question, myAnswer, req.body?.correctAnswer?.trim(), [
-      ...images,
-      ...answerImages,
-    ]);
+    const prof = loadProfile(db, COURSE_CODE);
+    const r = await review(
+      TEXTBOOK_FILE,
+      question,
+      myAnswer,
+      req.body?.correctAnswer?.trim(),
+      [...images, ...answerImages],
+      profilePrompt(prof),
+    );
     return {
       ok: true,
       mode: "grade",
-      view: { mode: "grade", ...r, errorTypeLabel: errorTypeLabel(r.error_type) },
+      view: {
+        mode: "grade",
+        ...r,
+        errorTypeLabel: errorTypeLabel(r.error_type),
+        inputKindLabel: INPUT_KIND_LABEL[r.input_kind] ?? r.input_kind,
+      },
       question,
       myAnswer,
     };
   } catch (e) {
     return reply.code(500).send({ ok: false, error: (e as Error).message });
+  }
+});
+
+/**
+ * 流式解题 / 批改（SSE）。
+ *
+ * 与非流式 /api/review 的差别只在「怎么把答案交出去」：
+ * 判定与引用照旧在开头给出，正文边生成边发，首字通常 3-5 秒到。
+ * 老接口保留：脚本与测试仍走它。
+ */
+app.post<{
+  Body: {
+    question?: string;
+    myAnswer?: string;
+    correctAnswer?: string;
+    images?: string[];
+    answerImages?: string[];
+    detail?: "full" | "brief";
+  };
+}>("/api/stream", async (req, reply) => {
+  const body = req.body ?? {};
+  const images = (body.images ?? []).slice(0, 4);
+  const answerImages = (body.answerImages ?? []).slice(0, 4);
+  const detail: Detail = body.detail === "brief" ? "brief" : "full";
+
+  // 自己接管响应：SSE 必须逐条 flush，不能被 Fastify 的 JSON 序列化包起来
+  reply.hijack();
+  const raw = reply.raw;
+  raw.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+
+  const send = (ev: StreamEvent): void => {
+    if (!raw.writableEnded) raw.write(`data: ${JSON.stringify(ev)}\n\n`);
+  };
+  const finish = (): void => {
+    if (!raw.writableEnded) raw.end();
+  };
+
+  try {
+    let question = body.question?.trim() ?? "";
+    let myAnswer = body.myAnswer?.trim() ?? "";
+    if (!question && images.length > 0) question = await imageTexts(images, "question");
+    if (!myAnswer && answerImages.length > 0) myAnswer = await imageTexts(answerImages, "answer");
+    if (!question) {
+      send({ type: "error", message: "题目不能为空" });
+      finish();
+      return;
+    }
+
+    const prof = loadProfile(db, COURSE_CODE);
+    const stream = myAnswer
+      ? reviewStream(
+          TEXTBOOK_FILE,
+          question,
+          myAnswer,
+          body.correctAnswer?.trim(),
+          [...images, ...answerImages],
+          profilePrompt(prof),
+          detail,
+        )
+      : solveStream(TEXTBOOK_FILE, question, {
+          images,
+          profileText: profilePrompt(prof),
+          detail,
+        });
+
+    let answerText = "";
+    for await (const ev of stream) {
+      if (raw.destroyed) break; // 用户关了页面就别再烧 token
+      if (ev.type === "delta") answerText += ev.text;
+      send(ev);
+    }
+
+    if (!myAnswer) {
+      db.prepare("INSERT INTO event (type, ref_type, payload) VALUES (?,?,?)").run(
+        "solve",
+        "textbook",
+        JSON.stringify({ q: question.slice(0, 120) }),
+      );
+      if (answerText) {
+        const beyond = await guardProgress(
+          question,
+          answerText,
+          prof.maxChapterNo,
+          CHAPTER_OUTLINE,
+        );
+        if (beyond.beyond.length > 0) {
+          send({ type: "beyond", beyond: beyond.beyond, maxChapterNo: prof.maxChapterNo });
+        }
+      }
+    }
+    finish();
+  } catch (e) {
+    send({ type: "error", message: (e as Error).message });
+    finish();
   }
 });
 
@@ -352,7 +513,86 @@ app.post<{ Params: { id: string }; Body: { correct?: boolean; myAnswer?: string 
   },
 );
 
+// ───────────────────────── M2：学习进度 / 学生画像 ─────────────────────────
+
+/** 画像 + 进度总览，前端「我的进度」页用 */
+app.get<{ Querystring: { course?: string } }>("/api/progress", async (req) => {
+  const course = req.query.course ?? COURSE_CODE;
+  return { ok: true, ...profileSummary(db, course), course };
+});
+
+/** 设置单章状态 */
+app.post<{
+  Body: { course?: string; chapterNo?: number; chapterTitle?: string; status?: ChapterStatus };
+}>("/api/progress", async (req, reply) => {
+  const b = req.body ?? {};
+  const course = b.course ?? COURSE_CODE;
+  const no = Number(b.chapterNo);
+  const status = (b.status ?? "done") as ChapterStatus;
+  if (!Number.isInteger(no) || no < 1 || no > 40) {
+    return reply.code(400).send({ ok: false, error: "chapterNo 必须是 1-40 的整数" });
+  }
+  if (!["not_started", "learning", "done"].includes(status)) {
+    return reply.code(400).send({ ok: false, error: "status 非法" });
+  }
+  setChapterProgress(db, {
+    courseCode: course,
+    chapterNo: no,
+    chapterTitle: b.chapterTitle ?? null,
+    status,
+    source: "manual",
+    evidence: "用户在界面上设置",
+    confidence: 1,
+  });
+  return { ok: true, ...profileSummary(db, course) };
+});
+
+/** 一句话把进度推到第 N 章（第 1..N 章标 done） */
+app.post<{ Body: { course?: string; chapterNo?: number } }>(
+  "/api/progress/advance",
+  async (req, reply) => {
+    const course = req.body?.course ?? COURSE_CODE;
+    const no = Number(req.body?.chapterNo);
+    if (!Number.isInteger(no) || no < 1 || no > 40) {
+      return reply.code(400).send({ ok: false, error: "chapterNo 必须是 1-40 的整数" });
+    }
+    advanceTo(db, course, no);
+    db.prepare("INSERT INTO event (type, ref_type, payload) VALUES (?,?,?)").run(
+      "progress_set",
+      "chapter_progress",
+      JSON.stringify({ course, chapterNo: no }),
+    );
+    return { ok: true, ...profileSummary(db, course) };
+  },
+);
+
+/** 当前注入给模型的画像原文，用于肉眼核对"模型到底看到了什么" */
+app.get<{ Querystring: { course?: string } }>("/api/profile/prompt", async (req) => {
+  const course = req.query.course ?? COURSE_CODE;
+  return { ok: true, course, prompt: profilePrompt(loadProfile(db, course)) };
+});
+
+/** 章节清单：用于前端渲染进度条（含未开始章节） */
+app.get<{ Querystring: { course?: string } }>("/api/progress/chapters", async (req) => {
+  const course = req.query.course ?? COURSE_CODE;
+  const rows = listChapterProgress(db, course);
+  return { ok: true, course, chapters: rows };
+});
+
 // ───────────────────────── 启动 ─────────────────────────
+
+/** 本机所有可用于局域网访问的 IPv4（跳过回环与虚拟适配器） */
+function lanAddresses(): string[] {
+  const out: string[] = [];
+  for (const list of Object.values(networkInterfaces())) {
+    for (const ni of list ?? []) {
+      if (ni.family !== "IPv4" || ni.internal) continue;
+      if (/^(169\.254\.|198\.18\.)/.test(ni.address)) continue; // 自动私有地址/测试网段
+      out.push(ni.address);
+    }
+  }
+  return [...new Set(out)];
+}
 
 const distDir = resolve(paths.data, "../web/dist");
 
@@ -371,8 +611,18 @@ async function main(): Promise<void> {
   }
 
   const port = Number(process.env.PORT ?? 8787);
-  await app.listen({ port, host: "127.0.0.1" });
-  app.log.info(`打开 http://127.0.0.1:${port}/`);
+  // 默认只监听本机。要让同一局域网的人看，设 HOST=0.0.0.0（见 README「分享给别人看」）。
+  const host = process.env.HOST ?? "127.0.0.1";
+  await app.listen({ port, host });
+  app.log.info(`本机打开 http://127.0.0.1:${port}/`);
+
+  if (host !== "127.0.0.1" && host !== "localhost") {
+    for (const ip of lanAddresses()) app.log.info(`局域网可访问 http://${ip}:${port}/`);
+    app.log.warn(
+      "⚠ 没有登录验证：任何能打开该地址的人都能看到本机的对话、错题原文与上传文件。" +
+        "演示结束请把 HOST 改回 127.0.0.1。",
+    );
+  }
 }
 
 const shutdown = async (): Promise<void> => {

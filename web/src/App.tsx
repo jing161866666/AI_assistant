@@ -1,18 +1,21 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api.ts";
+import { useJobs } from "./jobs.tsx";
 import Ask from "./tabs/Ask.tsx";
 import Mistakes from "./tabs/Mistakes.tsx";
+import Progress from "./tabs/Progress.tsx";
 import Review from "./tabs/Review.tsx";
 import Schedule from "./tabs/Schedule.tsx";
 import type { WeekResponse } from "./types.ts";
 
-type Tab = "schedule" | "ask" | "review" | "mistakes";
+type Tab = "schedule" | "ask" | "review" | "mistakes" | "progress";
 
 const TABS: Array<{ key: Tab; label: string }> = [
   { key: "schedule", label: "日程表" },
   { key: "ask", label: "问教材" },
   { key: "review", label: "改错" },
   { key: "mistakes", label: "错题本" },
+  { key: "progress", label: "我的进度" },
 ];
 
 export default function App() {
@@ -21,6 +24,9 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [mkVersion, setMkVersion] = useState(0);
+
+  const { jobs, running } = useJobs();
+  const busyTabs = new Set(jobs.filter((j) => j.status === "running").map((j) => j.id));
 
   /** 不传 week 时由服务端按系统时间定位当前周 */
   const load = useCallback(async (week?: number) => {
@@ -63,10 +69,22 @@ export default function App() {
               onClick={() => setTab(t.key)}
             >
               {t.label}
+              {busyTabs.has(t.key) && <span className="dot" title="后台还在跑，结果会保留" />}
             </button>
           ))}
         </nav>
       </header>
+
+      {running > 0 && (
+        <div className="jobbar">
+          <span className="spin">⟳</span>
+          {jobs
+            .filter((j) => j.status === "running")
+            .map((j) => j.label)
+            .join("、")}
+          进行中 —— 可以切到别的页面继续看别的，回来结果还在
+        </div>
+      )}
 
       {error && (
         <div className="alert errbox">
@@ -91,6 +109,7 @@ export default function App() {
       {tab === "ask" && <Ask />}
       {tab === "review" && <Review onSaved={() => setMkVersion((v) => v + 1)} />}
       {tab === "mistakes" && <Mistakes key={mkVersion} />}
+      {tab === "progress" && <Progress />}
     </div>
   );
 }

@@ -1,8 +1,12 @@
 import { useState } from "react";
 import { api } from "../api.ts";
+import BeyondNotice from "../components/BeyondNotice.tsx";
 import ImageInput from "../components/ImageInput.tsx";
 import MathText from "../components/MathText.tsx";
+import { useJobs } from "../jobs.tsx";
 import type { AskResponse } from "../types.ts";
+
+const JOB_ID = "ask";
 
 const EXAMPLES = [
   "杨氏双缝干涉的条纹间距公式是什么？什么时候条纹会变宽？",
@@ -14,26 +18,23 @@ const EXAMPLES = [
 export default function Ask() {
   const [q, setQ] = useState("");
   const [images, setImages] = useState<string[]>([]);
-  const [res, setRes] = useState<AskResponse | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [localErr, setLocalErr] = useState<string | null>(null);
 
-  const submit = async (text?: string): Promise<void> => {
+  // 与改错页共用同一套后台任务机制：切页面不中断、结果不丢
+  const jobs = useJobs();
+  const job = jobs.get<AskResponse>(JOB_ID);
+  const busy = job?.status === "running";
+  const res = job?.status === "done" ? (job.result ?? null) : null;
+  const err = localErr ?? (job?.status === "error" ? (job.error ?? "请求失败") : null);
+
+  const submit = (text?: string): void => {
     const question = (text ?? q).trim();
     if (!question && images.length === 0) {
-      setErr("请文字提问，或上传题目图片");
+      setLocalErr("请文字提问，或上传题目图片");
       return;
     }
-    setBusy(true);
-    setErr(null);
-    setRes(null);
-    try {
-      setRes(await api.ask(question, images));
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
+    setLocalErr(null);
+    jobs.run(JOB_ID, "问答", () => api.ask(question, images));
   };
 
   return (
@@ -41,7 +42,8 @@ export default function Ask() {
       <section className="panel">
         <h2>问教材 / 解题</h2>
         <p className="hint">
-          可以直接贴题图。图片先交给视觉模型转录（公式转 LaTeX、图形转文字描述）用于检索，
+          题目截图<b>直接 Ctrl+V 粘贴</b>即可，不用先点按钮。图片先交给视觉模型转录 （公式转
+          LaTeX、图形转文字描述）用于检索，
           <b>原图本身也会交给推理模型</b>——所以即使转录有偏差，答案仍以图为准。
         </p>
 
@@ -58,12 +60,12 @@ export default function Ask() {
           placeholder="或直接输入题目 / 疑问。图片识别后可在这里继续修改。"
           rows={5}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) void submit();
+            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) submit();
           }}
         />
         <div className="row">
-          <button type="button" className="primary" onClick={() => void submit()} disabled={busy}>
-            {busy ? "思考中…（看图约 30-50 秒）" : "提问（Ctrl+Enter）"}
+          <button type="button" className="primary" onClick={() => submit()} disabled={busy}>
+            {busy ? "思考中…（可切页，回来还有结果）" : "提问（Ctrl+Enter）"}
           </button>
           {res && (
             <span className="meta">
@@ -80,7 +82,7 @@ export default function Ask() {
               className="chip"
               onClick={() => {
                 setQ(e);
-                void submit(e);
+                submit(e);
               }}
             >
               {e}
@@ -94,6 +96,7 @@ export default function Ask() {
       {res && (
         <section className="panel">
           <h2>回答</h2>
+          <BeyondNotice beyond={res.beyond} maxChapterNo={res.maxChapterNo} />
           <MathText text={res.answer} />
           {res.citations.length > 0 && (
             <>
