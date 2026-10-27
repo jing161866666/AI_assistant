@@ -27,6 +27,9 @@
     "verify": "npm run init-db && npm run import:calendar && npm run import:timetable && npm run seed && npm run check",
     "demo:schedule": "tsx scripts/demo-schedule.ts",
     "demo:calendar": "tsx scripts/demo-calendar.ts",
+    "build:textbook": "tsx scripts/build-textbook.ts",
+    "test:rag": "tsx scripts/test-rag.ts",
+    "probe:corpus": "tsx scripts/probe-corpus.ts",
     "build:web": "npm --prefix web run build",
     "dev:web": "npm --prefix web run dev",
     "start": "npm run build:web && tsx src/server.ts",
@@ -36,7 +39,9 @@
     "@fastify/static": "^10.1.8",
     "dotenv": "^17.2.3",
     "fastify": "^5.6.1",
+    "mammoth": "^1.13.0",
     "openai": "^6.7.0",
+    "pdfjs-dist": "^6.4.299",
     "zod": "^4.1.12"
   },
   "devDependencies": {

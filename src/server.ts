@@ -6,6 +6,16 @@ import Fastify from "fastify";
 import { getLearnerDb, inspectTables, listTextbookDbs, paths } from "./db/index.js";
 import { checkEnv } from "./llm/models.js";
 import {
+  addAttempt,
+  deleteMistake,
+  getMistake,
+  listMistakes,
+  mistakeStats,
+  saveMistake,
+} from "./memory/mistakes.js";
+import { ask, errorTypeLabel, review } from "./rag/answer.js";
+import { textbookInfo } from "./rag/search.js";
+import {
   dateOfWeek,
   expandOccurrences,
   getActiveTerm,
@@ -162,6 +172,99 @@ app.post<{ Params: { name: string }; Body: unknown }>("/api/tools/:name", async 
     return reply.code(400).send({ ok: false, error: (e as Error).message });
   }
 });
+
+// ───────────────────────── M1：解题 / 改错 / 错题本 ─────────────────────────
+
+const TEXTBOOK_FILE = process.env.TEXTBOOK_FILE ?? "course-phy2.db";
+
+app.get("/api/textbook", async () => textbookInfo(TEXTBOOK_FILE));
+
+app.post<{ Body: { question?: string } }>("/api/ask", async (req, reply) => {
+  const question = req.body?.question?.trim();
+  if (!question) return reply.code(400).send({ ok: false, error: "question 不能为空" });
+  if (question.length > 2000) return reply.code(400).send({ ok: false, error: "问题过长" });
+  try {
+    const r = await ask(TEXTBOOK_FILE, question);
+    db.prepare("INSERT INTO event (type, ref_type, payload) VALUES (?,?,?)").run(
+      "ask",
+      "textbook",
+      JSON.stringify({ q: question.slice(0, 120), k: r.citations.length }),
+    );
+    return { ok: true, ...r };
+  } catch (e) {
+    return reply.code(500).send({ ok: false, error: (e as Error).message });
+  }
+});
+
+app.post<{ Body: { question?: string; myAnswer?: string; correctAnswer?: string } }>(
+  "/api/review",
+  async (req, reply) => {
+    const question = req.body?.question?.trim();
+    const myAnswer = req.body?.myAnswer?.trim();
+    if (!question || !myAnswer) {
+      return reply.code(400).send({ ok: false, error: "question 与 myAnswer 都不能为空" });
+    }
+    try {
+      const r = await review(TEXTBOOK_FILE, question, myAnswer, req.body?.correctAnswer?.trim());
+      return { ok: true, ...r, errorTypeLabel: errorTypeLabel(r.error_type) };
+    } catch (e) {
+      return reply.code(500).send({ ok: false, error: (e as Error).message });
+    }
+  },
+);
+
+app.get<{ Querystring: { errorType?: string; unresolved?: string } }>(
+  "/api/mistakes",
+  async (req) => ({
+    ok: true,
+    mistakes: listMistakes(db, {
+      errorType: req.query.errorType,
+      onlyUnresolved: req.query.unresolved === "1",
+    }),
+    stats: mistakeStats(db),
+  }),
+);
+
+app.post<{
+  Body: {
+    title?: string;
+    raw_text?: string;
+    my_answer?: string;
+    correct_answer?: string;
+    error_type?: string;
+    error_detail?: string;
+    kp_codes?: string[];
+  };
+}>("/api/mistakes", async (req, reply) => {
+  const b = req.body ?? {};
+  if (!b.title?.trim()) return reply.code(400).send({ ok: false, error: "title 必填" });
+  const id = saveMistake(db, {
+    title: b.title.trim(),
+    raw_text: b.raw_text ?? null,
+    my_answer: b.my_answer ?? null,
+    correct_answer: b.correct_answer ?? null,
+    error_type: b.error_type ?? null,
+    error_detail: b.error_detail ?? null,
+    kp_codes: b.kp_codes ?? [],
+    course_code: "PHY2",
+  });
+  return { ok: true, id };
+});
+
+app.delete<{ Params: { id: string } }>("/api/mistakes/:id", async (req, reply) => {
+  const ok = deleteMistake(db, Number(req.params.id));
+  return ok ? { ok: true } : reply.code(404).send({ ok: false, error: "不存在" });
+});
+
+app.post<{ Params: { id: string }; Body: { correct?: boolean; myAnswer?: string } }>(
+  "/api/mistakes/:id/attempt",
+  async (req, reply) => {
+    const id = Number(req.params.id);
+    if (!getMistake(db, id)) return reply.code(404).send({ ok: false, error: "不存在" });
+    const r = addAttempt(db, id, Boolean(req.body?.correct), req.body?.myAnswer);
+    return { ok: true, ...r };
+  },
+);
 
 // ───────────────────────── 启动 ─────────────────────────
 

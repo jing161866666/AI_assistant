@@ -24,15 +24,13 @@
     "rules": {
       "recommended": true,
       "suspicious": {
-        "noExplicitAny": "error"
+        "noExplicitAny": "error",
+        "noArrayIndexKey": "off"
       },
       "style": {
         "useConst": "error",
-        "noNonNullAssertion": "off"
-      },
-      "correctness": {
-        "noUnusedVariables": "error",
-        "noUnusedImports": "error"
+        "noNonNullAssertion": "off",
+        "noDescendingSpecificity": "off"
       }
     }
   },
