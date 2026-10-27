@@ -1,0 +1,44 @@
+{
+  "name": "ai-learning-companion",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "接入大语言模型的 AI 学习助手：本地记忆 + 教材 RAG + 教师教学改进反馈",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "init-db": "tsx scripts/init-db.ts",
+    "doctor": "tsx scripts/doctor.ts",
+    "probe": "tsx scripts/probe-models.ts",
+    "test-llm": "tsx scripts/test-llm.ts",
+    "seed": "tsx scripts/seed-schedule.ts",
+    "import:calendar": "tsx scripts/import-calendar.ts",
+    "import:timetable": "tsx scripts/import-timetable.ts",
+    "test:schedule": "tsx scripts/test-schedule.ts",
+    "test:calendar": "tsx scripts/test-calendar.ts",
+    "test": "npm run test:schedule && npm run test:calendar",
+    "lint": "biome check src scripts",
+    "lint:fix": "biome check --write src scripts",
+    "format": "biome format --write src scripts",
+    "format:check": "biome format src scripts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run lint && npm run typecheck && npm run test",
+    "verify": "npm run init-db && npm run import:calendar && npm run import:timetable && npm run seed && npm run check",
+    "demo:schedule": "tsx scripts/demo-schedule.ts",
+    "demo:calendar": "tsx scripts/demo-calendar.ts",
+    "dev": "tsx watch src/server.ts"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "fastify": "^5.6.1",
+    "openai": "^6.7.0",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.6.3",
+    "@types/node": "^24.9.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}

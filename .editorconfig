@@ -1,0 +1,17 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false
+
+[*.{ps1,psm1}]
+# PowerShell 5.1 会把无 BOM 的 UTF-8 当 ANSI 读，中文会乱码并导致解析失败。
+# 因此 .ps1 一律保持纯 ASCII，不要写入中文字面量。
+indent_size = 2

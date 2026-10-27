@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # 从空库开始，完整走一遍新开发者会走的路：
+      # 建库 → 导入校历 → 导入课表 → 灌合成数据 → lint/类型/测试
+      - name: Verify from scratch
+        run: npm run verify
+        env:
+          # 测试不需要真实 Key，占位符会被自检识别为未配置
+          LLM_API_KEY: sk-placeholder
+          LLM_BASE_URL: https://example.invalid/v1

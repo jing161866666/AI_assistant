@@ -1,0 +1,27 @@
+# 依赖与缓存
+node_modules/
+.npm-cache/
+dist/
+
+# 密钥与凭据（绝不可提交）
+.env
+.env.local
+.fb_token
+
+# 数据库（可重建，且含个人隐私）
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/textbook/*.db
+
+# 用户上传的原始文件与导出物（版权 + 体积）
+data/uploads/
+data/exports/
+
+# 教材与参考资料（版权，且体积大）
+大学物理下/
+
+# 杂项
+*.log
+.DS_Store
+Thumbs.db
