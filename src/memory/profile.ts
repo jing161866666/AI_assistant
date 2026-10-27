@@ -5,6 +5,7 @@ import {
   listChapterProgress,
   maxLearnedChapter,
 } from "./chapter-progress.js";
+import { injectableHabits } from "./habit-extract.js";
 
 /**
  * 学生画像：每次回答前注入的"你面前这个人是谁"。
@@ -84,13 +85,8 @@ export function loadProfile(
   courseCode: string,
   courseName = courseCode,
 ): Profile {
-  const habits = db
-    .prepare(
-      `SELECT * FROM habit
-       WHERE course_code IS NULL OR course_code = ?
-       ORDER BY dimension, confidence DESC`,
-    )
-    .all(courseCode) as unknown as HabitRow[];
+  // 只注入满足阈值的习惯（证据≥2 且置信度≥0.6）；不足阈值的只存不注入
+  const habits = injectableHabits(db, courseCode) as unknown as HabitRow[];
 
   const preferences = db
     .prepare("SELECT * FROM time_preference ORDER BY weekday_from, start_time")
@@ -136,6 +132,14 @@ export function gapsOf(p: Profile): number[] {
   const out: number[] = [];
   for (let n = 1; n <= p.maxChapterNo; n++) if (!p.learned.has(n)) out.push(n);
   return out;
+}
+
+/**
+ * 交给检索层做 L1 硬闸的过滤器。
+ * `null` = 没设进度（不过滤，由提示词收敛）；空集合 = 设了但一章没学（只放行题库）。
+ */
+export function progressFilter(p: Profile): Set<number> | null {
+  return p.maxChapterNo == null ? null : p.learned;
 }
 
 /**
@@ -216,6 +220,17 @@ export function profilePrompt(p: Profile): string {
   return lines.join("\n");
 }
 
+/** 全量习惯（含未达注入阈值的），供界面展示 */
+function allHabits(db: DatabaseSync, courseCode: string): HabitRow[] {
+  return db
+    .prepare(
+      `SELECT * FROM habit
+       WHERE course_code IS NULL OR course_code = ?
+       ORDER BY dimension, confidence DESC`,
+    )
+    .all(courseCode) as unknown as HabitRow[];
+}
+
 /** 供前端展示的画像摘要 */
 export function profileSummary(db: DatabaseSync, courseCode: string) {
   const p = loadProfile(db, courseCode);
@@ -223,8 +238,11 @@ export function profileSummary(db: DatabaseSync, courseCode: string) {
     courseCode: p.courseCode,
     maxChapterNo: p.maxChapterNo,
     learned: [...p.learned].sort((a, b) => a - b),
+    gaps: gapsOf(p),
+    // 门控状态：没设进度时前端要提示"先设进度，模型才知道该讲多深"
+    guard: progressFilter(p) == null ? "no-progress" : "ok",
     chapters: p.chapters,
-    habits: p.habits,
+    habits: allHabits(db, courseCode),
     preferences: p.preferences,
     capacities: p.capacities,
     goals: p.goals,
