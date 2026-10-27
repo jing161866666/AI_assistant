@@ -19,6 +19,7 @@ data/uploads/
 data/exports/
 
 # 教材与参考资料（版权，且体积大）
+data/corpus/
 大学物理下/
 
 # 杂项

@@ -13,7 +13,7 @@ function show(d: string, label: string): void {
   const mark = occ.some((o) => o.fromMakeup) ? " ★调休补课" : "";
   const tag = occ.length === 0 ? "【无课】" : "";
   console.log(
-    `\n${d} 周${WD[new Date(d + "T00:00:00Z").getUTCDay() === 0 ? 6 : new Date(d + "T00:00:00Z").getUTCDay() - 1]}  ${label}${tag}${mark}`,
+    `\n${d} 周${WD[new Date(`${d}T00:00:00Z`).getUTCDay() === 0 ? 6 : new Date(`${d}T00:00:00Z`).getUTCDay() - 1]}  ${label}${tag}${mark}`,
   );
   for (const o of occ.sort((a, b) => toMin(a.start) - toMin(b.start))) {
     console.log(`    ${o.start}-${o.end}  ${o.title}`);

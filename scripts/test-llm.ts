@@ -89,7 +89,7 @@ async function main(): Promise<void> {
       .join(",")}`;
   });
 
-  console.log("\n模型接口实测\n" + "─".repeat(74));
+  console.log(`\n模型接口实测\n${"─".repeat(74)}`);
   for (const r of results) {
     const flag = r.ok ? "✓" : "✗";
     console.log(

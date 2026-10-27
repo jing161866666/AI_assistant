@@ -183,6 +183,6 @@ check("学期内 planStudy 能排出东西", () => {
   assert.ok(p.length > 0, "一个块都没排出来");
 });
 
-console.log("\n" + "─".repeat(58));
+console.log(`\n${"─".repeat(58)}`);
 console.log(`通过 ${pass} 项，失败 ${fail} 项`);
 process.exit(fail === 0 ? 0 : 1);

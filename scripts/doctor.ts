@@ -89,7 +89,7 @@ check("schema 文件", true, () => {
 }
 
 const pad = (s: string, n: number) => (s.length >= n ? s : s + " ".repeat(n - s.length));
-console.log("\n环境自检\n" + "─".repeat(64));
+console.log(`\n环境自检\n${"─".repeat(64)}`);
 for (const c of checks) {
   console.log(`${c.ok ? "✓" : c.fatal ? "✗" : "!"} ${pad(c.name, 18)} ${c.detail}`);
 }

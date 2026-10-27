@@ -90,11 +90,12 @@ export interface AskResponse {
   citations: Citation[];
   model: string;
   ms: number;
+  question?: string;
 }
 
-export interface ReviewResponse {
-  ok: boolean;
-  verdict: "correct" | "partially" | "wrong";
+export interface ReviewView {
+  mode: "solve" | "grade";
+  verdict: "correct" | "partially" | "wrong" | "unsolved";
   error_type: string;
   errorTypeLabel: string;
   cause: string;
@@ -102,6 +103,16 @@ export interface ReviewResponse {
   hints: string[];
   related_kps: string[];
   references: Citation[];
+  model?: string;
+  ms?: number;
+}
+
+export interface ReviewResponse {
+  ok: boolean;
+  mode: "solve" | "grade";
+  view: ReviewView;
+  question: string;
+  myAnswer?: string;
 }
 
 export interface Mistake {

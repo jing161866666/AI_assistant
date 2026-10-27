@@ -13,7 +13,7 @@ import {
   mistakeStats,
   saveMistake,
 } from "./memory/mistakes.js";
-import { ask, errorTypeLabel, review } from "./rag/answer.js";
+import { ask, errorTypeLabel, review, solve } from "./rag/answer.js";
 import { textbookInfo } from "./rag/search.js";
 import {
   dateOfWeek,
@@ -27,8 +27,13 @@ import {
   resolveWeek,
 } from "./schedule/service.js";
 import { runTool } from "./schedule/tools.js";
+import { extractImage } from "./vision/extract.js";
 
-const app = Fastify({ logger: { level: "info" } });
+const app = Fastify({
+  logger: { level: "info" },
+  // 图片以 base64 传入，默认 1MB 不够
+  bodyLimit: 24 * 1024 * 1024,
+});
 const db = getLearnerDb();
 
 function localToday(): string {
@@ -179,39 +184,120 @@ const TEXTBOOK_FILE = process.env.TEXTBOOK_FILE ?? "course-phy2.db";
 
 app.get("/api/textbook", async () => textbookInfo(TEXTBOOK_FILE));
 
-app.post<{ Body: { question?: string } }>("/api/ask", async (req, reply) => {
-  const question = req.body?.question?.trim();
-  if (!question) return reply.code(400).send({ ok: false, error: "question 不能为空" });
-  if (question.length > 2000) return reply.code(400).send({ ok: false, error: "问题过长" });
+/** 图片识别：把图转成可计算文本（公式转 LaTeX、图形转文字描述） */
+app.post<{ Body: { image?: string; kind?: "question" | "answer" } }>(
+  "/api/extract-image",
+  async (req, reply) => {
+    const image = req.body?.image;
+    if (!image) return reply.code(400).send({ ok: false, error: "image 不能为空" });
+    try {
+      const r = await extractImage(db, image, req.body?.kind ?? "question");
+      return { ok: true, ...r };
+    } catch (e) {
+      return reply.code(400).send({ ok: false, error: (e as Error).message });
+    }
+  },
+);
+
+/** 把多张图依次识别并拼接（一道题常跨两页） */
+async function imageTexts(images: string[], kind: "question" | "answer"): Promise<string> {
+  const parts: string[] = [];
+  for (const img of images) {
+    const r = await extractImage(db, img, kind);
+    parts.push(r.text);
+  }
+  return parts.join("\n\n---\n\n");
+}
+
+app.post<{ Body: { question?: string; images?: string[] } }>("/api/ask", async (req, reply) => {
+  let question = req.body?.question?.trim() ?? "";
+  const images = (req.body?.images ?? []).slice(0, 4);
   try {
-    const r = await ask(TEXTBOOK_FILE, question);
+    // 只有拿不到文字时才转录（转录用于检索）；有文字时原图直接交给推理模型
+    if (!question && images.length > 0) {
+      question = await imageTexts(images, "question");
+    }
+    if (!question) return reply.code(400).send({ ok: false, error: "问题或图片至少给一个" });
+    if (question.length > 8000) return reply.code(400).send({ ok: false, error: "内容过长" });
+    const r = await ask(TEXTBOOK_FILE, question, 6, images);
     db.prepare("INSERT INTO event (type, ref_type, payload) VALUES (?,?,?)").run(
       "ask",
       "textbook",
-      JSON.stringify({ q: question.slice(0, 120), k: r.citations.length }),
+      JSON.stringify({ q: question.slice(0, 120), k: r.citations.length, imgs: images.length }),
     );
-    return { ok: true, ...r };
+    return { ok: true, ...r, question };
   } catch (e) {
     return reply.code(500).send({ ok: false, error: (e as Error).message });
   }
 });
 
-app.post<{ Body: { question?: string; myAnswer?: string; correctAnswer?: string } }>(
-  "/api/review",
-  async (req, reply) => {
-    const question = req.body?.question?.trim();
-    const myAnswer = req.body?.myAnswer?.trim();
-    if (!question || !myAnswer) {
-      return reply.code(400).send({ ok: false, error: "question 与 myAnswer 都不能为空" });
+/**
+ * 改错 / 只解题。
+ * 不传 myAnswer 时不分析错因，直接给标准解答——但依然可以存进错题本。
+ */
+app.post<{
+  Body: {
+    question?: string;
+    myAnswer?: string;
+    correctAnswer?: string;
+    images?: string[];
+    answerImages?: string[];
+  };
+}>("/api/review", async (req, reply) => {
+  let question = req.body?.question?.trim() ?? "";
+  let myAnswer = req.body?.myAnswer?.trim() ?? "";
+  const images = (req.body?.images ?? []).slice(0, 4);
+  const answerImages = (req.body?.answerImages ?? []).slice(0, 4);
+
+  try {
+    if (!question && images.length > 0) question = await imageTexts(images, "question");
+    if (!myAnswer && answerImages.length > 0) {
+      myAnswer = await imageTexts(answerImages, "answer");
     }
-    try {
-      const r = await review(TEXTBOOK_FILE, question, myAnswer, req.body?.correctAnswer?.trim());
-      return { ok: true, ...r, errorTypeLabel: errorTypeLabel(r.error_type) };
-    } catch (e) {
-      return reply.code(500).send({ ok: false, error: (e as Error).message });
+    if (!question) return reply.code(400).send({ ok: false, error: "题目不能为空" });
+
+    if (!myAnswer) {
+      const r = await solve(TEXTBOOK_FILE, question, 5, images);
+      db.prepare("INSERT INTO event (type, ref_type, payload) VALUES (?,?,?)").run(
+        "solve",
+        "textbook",
+        JSON.stringify({ q: question.slice(0, 120) }),
+      );
+      return {
+        ok: true,
+        mode: "solve",
+        view: {
+          mode: "solve",
+          verdict: "unsolved",
+          error_type: "none",
+          errorTypeLabel: "只解题",
+          cause: "",
+          correction: r.answer,
+          hints: [],
+          related_kps: [],
+          references: r.citations,
+          model: r.model,
+          ms: r.ms,
+        },
+        question,
+      };
     }
-  },
-);
+
+    const r = await review(TEXTBOOK_FILE, question, myAnswer, req.body?.correctAnswer?.trim(), [
+      ...images,
+      ...answerImages,
+    ]);
+    return {
+      ok: true,
+      mode: "grade",
+      view: { mode: "grade", ...r, errorTypeLabel: errorTypeLabel(r.error_type) },
+      question,
+      myAnswer,
+    };
+  } catch (e) {
+    return reply.code(500).send({ ok: false, error: (e as Error).message });
+  }
+});
 
 app.get<{ Querystring: { errorType?: string; unresolved?: string } }>(
   "/api/mistakes",

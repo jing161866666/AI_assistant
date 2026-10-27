@@ -15,7 +15,7 @@ console.log(describeUserContext(db));
 const from = dateOfWeek(term.start_date, 3, 1);
 const to = dateOfWeek(term.start_date, 3, 7);
 
-console.log("\n" + "═".repeat(70));
+console.log(`\n${"═".repeat(70)}`);
 console.log(`第 3 周日程（${from} ~ ${to}）—— 注意周三物理调到周四`);
 console.log("═".repeat(70));
 
@@ -45,7 +45,7 @@ for (const d of view.days) {
   console.log(`  空闲: ${free || "（无）"}`);
 }
 
-console.log("\n" + "═".repeat(70));
+console.log(`\n${"═".repeat(70)}`);
 console.log("模型请求排学习计划：第 4 周，每天 150 分钟");
 console.log("═".repeat(70));
 const plan = runTool(db, "schedule_plan_study", {
@@ -59,9 +59,9 @@ const plan = runTool(db, "schedule_plan_study", {
 
 for (const b of plan.blocks) {
   const wd = "一二三四五六日"[
-    new Date(b.date + "T00:00:00Z").getUTCDay() === 0
+    new Date(`${b.date}T00:00:00Z`).getUTCDay() === 0
       ? 6
-      : new Date(b.date + "T00:00:00Z").getUTCDay() - 1
+      : new Date(`${b.date}T00:00:00Z`).getUTCDay() - 1
   ];
   console.log(`  周${wd} ${b.date}  ${b.start}-${b.end}  ${b.minutes} 分钟`);
 }

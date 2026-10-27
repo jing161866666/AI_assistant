@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "../api.ts";
+import ImageInput from "../components/ImageInput.tsx";
 import MathText from "../components/MathText.tsx";
 import type { AskResponse } from "../types.ts";
 
@@ -12,19 +13,22 @@ const EXAMPLES = [
 
 export default function Ask() {
   const [q, setQ] = useState("");
+  const [images, setImages] = useState<string[]>([]);
   const [res, setRes] = useState<AskResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const submit = async (text?: string): Promise<void> => {
     const question = (text ?? q).trim();
-    if (!question) return;
+    if (!question && images.length === 0) {
+      setErr("请文字提问，或上传题目图片");
+      return;
+    }
     setBusy(true);
     setErr(null);
     setRes(null);
     try {
-      const r = await api.ask(question);
-      setRes(r);
+      setRes(await api.ask(question, images));
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -35,23 +39,31 @@ export default function Ask() {
   return (
     <div className="page">
       <section className="panel">
-        <h2>问教材</h2>
+        <h2>问教材 / 解题</h2>
         <p className="hint">
-          回答优先依据本地教材库（王雷课件 + 清华题库，1498 段），引用会标编号。
-          资料里没有的会明确说明，不会假装。
+          可以直接贴题图。图片先交给视觉模型转录（公式转 LaTeX、图形转文字描述）用于检索，
+          <b>原图本身也会交给推理模型</b>——所以即使转录有偏差，答案仍以图为准。
         </p>
+
+        <ImageInput
+          kind="question"
+          label="题目图片"
+          onImages={setImages}
+          onText={(t) => setQ((prev) => (prev.trim() ? `${t}\n\n${prev}` : t))}
+        />
+
         <textarea
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder="把题目或疑问贴进来，例如：一束光垂直入射到折射率 1.5 的薄膜上，反射光相长干涉的条件是什么？"
-          rows={4}
+          placeholder="或直接输入题目 / 疑问。图片识别后可在这里继续修改。"
+          rows={5}
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) void submit();
           }}
         />
         <div className="row">
           <button type="button" className="primary" onClick={() => void submit()} disabled={busy}>
-            {busy ? "思考中…" : "提问（Ctrl+Enter）"}
+            {busy ? "思考中…（看图约 30-50 秒）" : "提问（Ctrl+Enter）"}
           </button>
           {res && (
             <span className="meta">
@@ -59,6 +71,7 @@ export default function Ask() {
             </span>
           )}
         </div>
+
         <div className="chips">
           {EXAMPLES.map((e) => (
             <button

@@ -27,16 +27,26 @@ export const api = {
       body: JSON.stringify({ week, perDayMinutes }),
     }),
 
-  ask: (question: string) =>
+  ask: (question: string, images?: string[]) =>
     req<import("./types.ts").AskResponse>("/api/ask", {
       method: "POST",
-      body: JSON.stringify({ question }),
+      body: JSON.stringify({ question, images }),
     }),
 
-  review: (question: string, myAnswer: string, correctAnswer?: string) =>
+  review: (
+    question: string,
+    myAnswer?: string,
+    opts?: { correctAnswer?: string; images?: string[]; answerImages?: string[] },
+  ) =>
     req<import("./types.ts").ReviewResponse>("/api/review", {
       method: "POST",
-      body: JSON.stringify({ question, myAnswer, correctAnswer }),
+      body: JSON.stringify({
+        question,
+        myAnswer,
+        correctAnswer: opts?.correctAnswer,
+        images: opts?.images,
+        answerImages: opts?.answerImages,
+      }),
     }),
 
   mistakes: () =>

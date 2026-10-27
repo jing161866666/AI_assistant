@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "../api.ts";
+import ImageInput from "../components/ImageInput.tsx";
 import MathText from "../components/MathText.tsx";
 import type { ReviewResponse } from "../types.ts";
 
@@ -7,20 +8,22 @@ const VERDICT: Record<string, { label: string; cls: string }> = {
   correct: { label: "答对了", cls: "v-ok" },
   partially: { label: "部分正确", cls: "v-part" },
   wrong: { label: "答错了", cls: "v-bad" },
+  unsolved: { label: "只解题", cls: "v-solve" },
 };
 
 export default function Review({ onSaved }: { onSaved: () => void }) {
   const [question, setQuestion] = useState("");
   const [myAnswer, setMyAnswer] = useState("");
-  const [correct, setCorrect] = useState("");
+  const [images, setImages] = useState<string[]>([]);
+  const [answerImages, setAnswerImages] = useState<string[]>([]);
   const [res, setRes] = useState<ReviewResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
 
   const submit = async (): Promise<void> => {
-    if (!question.trim() || !myAnswer.trim()) {
-      setErr("题目和你的答案都要填");
+    if (!question.trim() && images.length === 0) {
+      setErr("题目文字或题目图片至少给一个");
       return;
     }
     setBusy(true);
@@ -28,7 +31,12 @@ export default function Review({ onSaved }: { onSaved: () => void }) {
     setRes(null);
     setSaved(false);
     try {
-      setRes(await api.review(question, myAnswer, correct || undefined));
+      setRes(
+        await api.review(question.trim(), myAnswer.trim() || undefined, {
+          images,
+          answerImages,
+        }),
+      );
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -38,15 +46,16 @@ export default function Review({ onSaved }: { onSaved: () => void }) {
 
   const save = async (): Promise<void> => {
     if (!res) return;
+    const v = res.view;
     try {
       await api.saveMistake({
-        title: question.slice(0, 200),
-        raw_text: question,
-        my_answer: myAnswer,
-        correct_answer: res.correction,
-        error_type: res.error_type,
-        error_detail: res.cause,
-        kp_codes: res.related_kps,
+        title: (res.question || "图片题").slice(0, 200),
+        raw_text: res.question,
+        my_answer: res.myAnswer ?? "",
+        correct_answer: v.correction,
+        error_type: v.error_type,
+        error_detail: v.cause,
+        kp_codes: v.related_kps,
       });
       setSaved(true);
       onSaved();
@@ -55,85 +64,124 @@ export default function Review({ onSaved }: { onSaved: () => void }) {
     }
   };
 
+  const v = res?.view;
+  const isSolve = res?.mode === "solve";
+
   return (
     <div className="page">
       <section className="panel">
-        <h2>改错</h2>
+        <h2>改错 / 解题</h2>
         <p className="hint">
-          贴题目和你的答案（数值或推导都行），会判断对错并归因到具体的错因类型。
-          归因是给老师看教学调整用的核心字段，请认真填。
+          题目和你的作答都可以拍照上传。<b>不填作答就只解题、不分析错因</b>，但同样能存进错题本。
+          图片会先转录用于检索，原图同时交给推理模型，图形信息不会丢。
         </p>
 
         <label className="fld">
           <span>题目</span>
+          <ImageInput
+            kind="question"
+            label="题目图片"
+            onImages={setImages}
+            onText={(t) => setQuestion((prev) => (prev.trim() ? `${t}\n\n${prev}` : t))}
+          />
           <textarea
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
-            rows={3}
-            placeholder="把题目原文贴进来"
+            rows={4}
+            placeholder="题目原文，或上传图片后在此校对识别结果"
           />
         </label>
 
         <label className="fld">
-          <span>我的答案</span>
+          <span>
+            我的答案 <em>（留空则只解题，不分析错因）</em>
+          </span>
+          <ImageInput
+            kind="answer"
+            label="手写作答图片"
+            onImages={setAnswerImages}
+            onText={(t) => setMyAnswer((prev) => (prev.trim() ? `${t}\n\n${prev}` : t))}
+          />
           <textarea
             value={myAnswer}
             onChange={(e) => setMyAnswer(e.target.value)}
             rows={3}
-            placeholder="只写数值也行，例如 1.5e-7 m；也可以贴完整推导"
+            placeholder="数值、公式或整段推导。留空即只解题。"
           />
-        </label>
-
-        <label className="fld">
-          <span>参考答案（可选，有的话判断更准）</span>
-          <textarea value={correct} onChange={(e) => setCorrect(e.target.value)} rows={2} />
         </label>
 
         <div className="row">
           <button type="button" className="primary" onClick={() => void submit()} disabled={busy}>
-            {busy ? "批改中…" : "开始批改"}
+            {busy ? "处理中…" : myAnswer.trim() || answerImages.length ? "开始批改" : "解题"}
           </button>
         </div>
       </section>
 
       {err && <div className="alert errbox">{err}</div>}
 
-      {res && (
+      {res && v && (
         <section className="panel">
           <div className="row between">
-            <span className={`verdict ${VERDICT[res.verdict]?.cls ?? ""}`}>
-              {VERDICT[res.verdict]?.label ?? res.verdict}
+            <span className={`verdict ${VERDICT[v.verdict]?.cls ?? ""}`}>
+              {VERDICT[v.verdict]?.label ?? v.verdict}
             </span>
-            <span className="tag">{res.errorTypeLabel}</span>
+            {!isSolve && <span className="tag">{v.errorTypeLabel}</span>}
+            <span className="meta">
+              {v.model} · {v.ms}ms
+            </span>
           </div>
 
-          <h3>错在哪</h3>
-          <p>{res.cause}</p>
-
-          <h3>正确答案</h3>
-          <MathText text={res.correction} />
-
-          {res.hints.length > 0 && (
+          {isSolve ? (
             <>
-              <h3>下次注意</h3>
-              <ul className="mdlist">
-                {res.hints.map((h) => (
-                  <li key={h}>{h}</li>
-                ))}
-              </ul>
+              <h3>标准解答</h3>
+              <MathText text={v.correction} />
+            </>
+          ) : (
+            <>
+              <h3>错在哪</h3>
+              <p>{v.cause}</p>
+              <h3>正确答案</h3>
+              <MathText text={v.correction} />
+              {v.hints.length > 0 && (
+                <>
+                  <h3>下次注意</h3>
+                  <ul className="mdlist">
+                    {v.hints.map((h) => (
+                      <li key={h}>{h}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
             </>
           )}
 
-          {res.related_kps.length > 0 && (
+          {v.related_kps.length > 0 && (
             <>
               <h3>相关知识点</h3>
               <div className="chips">
-                {res.related_kps.map((k) => (
+                {v.related_kps.map((k) => (
                   <span className="chip static" key={k}>
                     {k}
                   </span>
                 ))}
               </div>
+            </>
+          )}
+
+          {v.references.length > 0 && (
+            <>
+              <h3>引用来源</h3>
+              <ol className="cites">
+                {v.references.map((c) => (
+                  <li key={c.index}>
+                    <div className="ct">
+                      <b>{c.textbook}</b> · {c.chapter}
+                      {c.page != null ? ` · 第 ${c.page} 页` : ""}
+                    </div>
+                    <div className="ce">{c.excerpt}…</div>
+                  </li>
+                ))}
+              </ol>
             </>
           )}
 

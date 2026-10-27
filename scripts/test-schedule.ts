@@ -183,6 +183,6 @@ check("每周总量不超过周上限 900 分钟", () => {
   }
 });
 
-console.log("\n" + "─".repeat(56));
+console.log(`\n${"─".repeat(56)}`);
 console.log(`通过 ${pass} 项，失败 ${fail} 项`);
 process.exit(fail === 0 ? 0 : 1);

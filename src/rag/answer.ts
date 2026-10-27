@@ -31,6 +31,26 @@ function buildMaterial(hits: Hit[]): string {
     .join("\n\n");
 }
 
+/**
+ * 把文字与图片拼成一条用户消息。
+ *
+ * 图片直接交给模型，而不是先 OCR 再传文字：
+ * 物理题的示意图（光路、受力、电路、波形）一旦 OCR 就彻底丢失，
+ * 而 qwen3.8-max 本身能看图（实测正确解出了折射角与板内路程）。
+ * 所以原图是真相来源，转录文字只用于检索与存档。
+ */
+export type ContentParts = Array<
+  { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }
+>;
+
+function userContent(text: string, images?: string[]): string | ContentParts {
+  if (!images || images.length === 0) return text;
+  return [
+    { type: "text", text },
+    ...images.map((url) => ({ type: "image_url" as const, image_url: { url } })),
+  ];
+}
+
 const ASK_SYSTEM = `你是东南大学「大学物理(B)II」课程的助教，正在帮助学生复习。
 
 规则：
@@ -48,7 +68,12 @@ export interface AskResult {
   ms: number;
 }
 
-export async function ask(file: string, question: string, k = 6): Promise<AskResult> {
+export async function ask(
+  file: string,
+  question: string,
+  k = 6,
+  images?: string[],
+): Promise<AskResult> {
   const t0 = Date.now();
   const hits = await retrieve(file, question, k);
   const cfg = getLlmConfig("reason");
@@ -58,7 +83,7 @@ export async function ask(file: string, question: string, k = 6): Promise<AskRes
       model: cfg.model,
       messages: [
         { role: "system", content: ASK_SYSTEM },
-        { role: "user", content: `资料：无\n\n问题：${question}` },
+        { role: "user", content: userContent(`资料：无\n\n问题：${question}`, images) },
       ],
       max_tokens: cfg.maxTokens,
       temperature: cfg.temperature,
@@ -77,13 +102,64 @@ export async function ask(file: string, question: string, k = 6): Promise<AskRes
       { role: "system", content: ASK_SYSTEM },
       {
         role: "user",
-        content: `资料：\n${buildMaterial(hits)}\n\n问题：${question}`,
+        content: userContent(`资料：\n${buildMaterial(hits)}\n\n问题：${question}`, images),
       },
     ],
     max_tokens: cfg.maxTokens,
     temperature: cfg.temperature,
   });
 
+  return {
+    answer: r.choices[0]?.message?.content ?? "",
+    citations: toCitations(hits),
+    model: cfg.model,
+    ms: Date.now() - t0,
+  };
+}
+
+// ───────────────────────── 只解题（用户没给答案） ─────────────────────────
+
+const SOLVE_SYSTEM = `你是东南大学「大学物理(B)II」课程的老师，正在给学生讲一道题。
+
+规则：
+1. 先判断题目问什么，再分步骤求解：已知 → 求 → 依据的原理/公式 → 代入 → 结果（带单位）。
+2. 涉及教材资料的地方用 [1] [2] 编号标注引用。
+3. 公式用 $...$（行内）或 $$...$$（独立成行）。
+4. 如果题目里有【图：...】描述，必须依据该描述理解几何关系，并明确说出你从中读到了什么。
+5. 最后用一句话点出核心考点，以「本题考点：」开头。
+6. 不要评价学生水平，不要说「你应该」。`;
+
+export interface SolveResult {
+  answer: string;
+  citations: Citation[];
+  model: string;
+  ms: number;
+}
+
+export async function solve(
+  file: string,
+  question: string,
+  k = 5,
+  images?: string[],
+): Promise<SolveResult> {
+  const t0 = Date.now();
+  const hits = await retrieve(file, question, k);
+  const cfg = getLlmConfig("reason");
+  const r = await llm("reason").chat.completions.create({
+    model: cfg.model,
+    messages: [
+      { role: "system", content: SOLVE_SYSTEM },
+      {
+        role: "user",
+        content: userContent(
+          `资料：\n${buildMaterial(hits) || "（无匹配资料，请依据你自己的物理知识求解）"}\n\n题目：${question}`,
+          images,
+        ),
+      },
+    ],
+    max_tokens: 2500,
+    temperature: 0.2,
+  });
   return {
     answer: r.choices[0]?.message?.content ?? "",
     citations: toCitations(hits),
@@ -174,6 +250,7 @@ export async function review(
   question: string,
   myAnswer: string,
   correctAnswer?: string,
+  images?: string[],
 ): Promise<ReviewResult> {
   const hits = await retrieve(file, `${question} ${myAnswer}`.slice(0, 400), 4);
   // 判对错需要推理能力，用 reason 角色；extract 角色（flash 级）实测会把
@@ -193,7 +270,7 @@ export async function review(
     model: cfg.model,
     messages: [
       { role: "system", content: REVIEW_SYSTEM },
-      { role: "user", content: user },
+      { role: "user", content: userContent(user, images) },
     ],
     max_tokens: 1200,
     temperature: 0,
