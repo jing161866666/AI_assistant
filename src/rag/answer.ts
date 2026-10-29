@@ -2,7 +2,7 @@ import { z } from "zod";
 import { llm } from "../llm/client.js";
 import { getLlmConfig } from "../llm/models.js";
 import { type BankLookup, bankPromptBlock, kindLabel, lookupBank } from "./bank.js";
-import { embedQuery, type Hit, retrieve } from "./search.js";
+import { embedQuery, type Hit, type LearnedFilter, retrieve } from "./search.js";
 
 /** 引用上限：前端只展示 3 条，提示词里也只给 3 段，避免模型编号到 [5] 却无出处 */
 export const CITATION_LIMIT = 3;
@@ -64,15 +64,16 @@ function withProfile(text: string, profileText?: string): string {
   return profileText ? `${profileText}\n\n${text}` : text;
 }
 
-const ASK_SYSTEM = `你是东南大学「大学物理(B)II」课程的助教，正在帮助学生复习。
+const ASK_SYSTEM = `你是【当前科目】的助教，正在帮助学生复习。科目信息见用户消息开头的【学生画像】与【科目路由】。
 
 规则：
 1. 优先依据提供的资料作答。资料里没有的内容，直接说「资料里没有这部分」，再补充你自己的知识并标注「（非资料）」。绝不假装资料里有。
 2. 凡是引用资料的地方，用 [1] [2] 这样的编号标注，编号对应资料顺序。
-3. 物理公式用行内 LaTeX：$F = k\\frac{q_1 q_2}{r^2}$。
+3. 物理/数学公式用行内 LaTeX：$F = k\\frac{q_1 q_2}{r^2}$。
 4. 解题时分步骤写清楚：已知 → 求 → 用什么原理 → 代入 → 结果（带单位）。
 5. 不要复述资料原文，要转成学生能看懂的解释。
-6. 篇幅控制在 400 字以内，除非题目需要更详细推导。`;
+6. 如果【科目路由】判断这道题更像另一门已勾选科目的题，第一句如实说明「这道题更像《X》的内容，我按当前科目资料可能讲不全」，再按题目本身作答；不要因为学生当前选的是这一科就硬把它当这科的题。
+7. 篇幅控制在 400 字以内，除非题目需要更详细推导。`;
 
 export interface AskResult {
   answer: string;
@@ -87,9 +88,11 @@ export async function ask(
   k = CITATION_LIMIT,
   images?: string[],
   profileText?: string,
+  /** 章节门控：未学章节的正文不进上下文（未设进度时传 null） */
+  filter: LearnedFilter = null,
 ): Promise<AskResult> {
   const t0 = Date.now();
-  const hits = await retrieve(file, question, k);
+  const hits = await retrieve(file, question, k, undefined, filter);
   const cfg = getLlmConfig("reason");
 
   if (hits.length === 0) {
@@ -119,7 +122,10 @@ export async function ask(
       { role: "system", content: ASK_SYSTEM },
       {
         role: "user",
-        content: userContent(`资料：\n${buildMaterial(hits)}\n\n问题：${question}`, images),
+        content: userContent(
+          withProfile(`资料：\n${buildMaterial(hits)}\n\n问题：${question}`, profileText),
+          images,
+        ),
       },
     ],
     max_tokens: cfg.maxTokens,
@@ -134,9 +140,50 @@ export async function ask(
   };
 }
 
+// ───────────────────────── 不带教材的纯回答 ─────────────────────────
+
+/**
+ * 题目不属于用户勾选的任何科目时用这个：**只作答，不引教材、不查题库**。
+ *
+ * 为什么不去借一门科目的教材：借错了会给出"看起来有引用"的错误答案，
+ * 比没有引用更糟。宁可让用户看到"这题不在你勾选的科目里"。
+ */
+export async function askGeneral(
+  question: string,
+  images?: string[],
+  profileText?: string,
+): Promise<AskResult> {
+  const t0 = Date.now();
+  const cfg = getLlmConfig("reason");
+  const r = await llm("reason").chat.completions.create({
+    model: cfg.model,
+    messages: [
+      { role: "system", content: ASK_SYSTEM },
+      {
+        role: "user",
+        content: userContent(
+          withProfile(
+            `资料：无（这道题不在你勾选的科目里，本次不引用任何教材）\n\n问题：${question}`,
+            profileText,
+          ),
+          images,
+        ),
+      },
+    ],
+    max_tokens: cfg.maxTokens,
+    temperature: cfg.temperature,
+  });
+  return {
+    answer: r.choices[0]?.message?.content ?? "",
+    citations: [],
+    model: cfg.model,
+    ms: Date.now() - t0,
+  };
+}
+
 // ───────────────────────── 只解题（用户没给答案） ─────────────────────────
 
-const SOLVE_SYSTEM = `你是东南大学「大学物理(B)II」课程的老师，正在给学生讲一道题。
+const SOLVE_SYSTEM = `你是【当前科目】的老师，正在给学生讲一道题。科目信息见用户消息开头的【学生画像】与【科目路由】。
 
 解题前你会拿到一份【题库检索结果】，它只可能处于下面四种状态之一，必须按对应规则处理：
 
@@ -209,6 +256,8 @@ export interface SolvePrep {
   bank: SolveBankInfo | null;
   citations: Citation[];
   model: string;
+  /** 用哪个角色的客户端发请求（fast 档可能指向另一家供应商） */
+  role: "reason" | "fast";
 }
 
 export async function prepareSolve(
@@ -220,6 +269,13 @@ export async function prepareSolve(
   studentInput?: string,
   profileText?: string,
   detail: Detail = "full",
+  /** 章节门控：未学章节的正文不进上下文（未设进度时传 null） */
+  filter: LearnedFilter = null,
+  /**
+   * 速度档：smart = reason 模型（准）；fast = 更快的小模型（用户主动选，接受质量下降）。
+   * 判对错不走这条路径——判错代价太高，见 review()。
+   */
+  speed: "smart" | "fast" = "smart",
 ): Promise<SolvePrep> {
   // 查询向量只算一次：题库比对与教材检索共用，省掉两次 embedding 往返
   const qv = await embedQuery(question);
@@ -235,7 +291,7 @@ export async function prepareSolve(
         reason: `题库检索失败：${e.message}`,
       }),
     ),
-    retrieve(file, question, k, qv),
+    retrieve(file, question, k, qv, filter),
   ]);
 
   // 命中的那道题不要同时出现在教材引用里，否则同一段内容被引用两次
@@ -244,7 +300,8 @@ export async function prepareSolve(
       ? allHits.filter((h) => h.chunkId !== bank.question?.chunkId)
       : allHits;
 
-  const cfg = getLlmConfig("reason");
+  // 快答档用 fast 角色（默认 flash 级，也可在 .env 指到别家更快的模型）
+  const cfg = getLlmConfig(speed === "fast" ? "fast" : "reason");
   const material = buildMaterial(hits) || "（无匹配教材资料）";
   const hasAnswer = bank.verdict === "same" && bank.question?.answer !== null;
   const prior = studentInput?.trim();
@@ -286,6 +343,7 @@ export async function prepareSolve(
         : null,
     citations: toCitations(hits),
     model: cfg.model,
+    role: speed === "fast" ? "fast" : "reason",
   };
 }
 
@@ -298,11 +356,26 @@ export async function solve(
   studentInput?: string,
   profileText?: string,
   detail: Detail = "full",
+  /** 章节门控：未学章节的正文不进上下文（未设进度时传 null） */
+  filter: LearnedFilter = null,
+  /** 速度档：smart（默认，准）/ fast（快，用户主动选） */
+  speed: "smart" | "fast" = "smart",
 ): Promise<SolveResult> {
   const t0 = Date.now();
-  const p = await prepareSolve(file, question, k, images, studentInput, profileText, detail);
+  const p = await prepareSolve(
+    file,
+    question,
+    k,
+    images,
+    studentInput,
+    profileText,
+    detail,
+    filter,
+    speed,
+  );
 
-  const r = await llm("reason").chat.completions.create({
+  const role = speed === "fast" ? "fast" : "reason";
+  const r = await llm(role).chat.completions.create({
     model: p.model,
     messages: [
       { role: "system", content: p.system },
@@ -359,6 +432,8 @@ export const reviewSchema = z.object({
   correction: z.string().catch(""),
   hints: z.array(z.string()).catch([]),
   related_kps: z.array(z.string()).catch([]),
+  /** 科目分流：只能填【科目路由】里列出的代码，或 unsure。由代码再做白名单校验 */
+  subject_guess: z.string().catch(""),
 });
 
 export type ReviewResult = z.infer<typeof reviewSchema> & {
@@ -397,7 +472,7 @@ function stripFence(s: string): string {
  * 流式与非流式只在「输出格式」上不同，规则必须完全一致，
  * 否则同一个学生输入在两种模式下会得到不同判定。
  */
-const REVIEW_RULES = `你是大学物理课的批改助教。给你一道题、学生输入、以及教材资料。
+const REVIEW_RULES = `你是【当前科目】的批改助教。科目信息见用户消息开头的【学生画像】与【科目路由】。给你一道题、学生输入、以及教材资料。
 
 第一步：判断 input_kind —— 这一步判错会让整份结果都不对。
 - "answer"   学生给的是最终答案：一个数值、一个选项、一个表达式、或一句话结论。
@@ -435,7 +510,9 @@ const REVIEW_FIELD_SPEC = `- verdict: "correct" | "partially" | "wrong" | "unsol
 - cause: 一句话说清（50 字内）
 - correction: 完整详细解答（不限字数，含【扩充解析】：考点 / 易错点 / 同类型题思路）
 - hints: 字符串数组，1-3 条，下次遇到同类题要注意什么
-- related_kps: 字符串数组，相关知识点名称，2-4 个`;
+- related_kps: 字符串数组，相关知识点名称，2-4 个
+- subject_guess: 从【科目路由】的候选代码里选一个最可能属于的科目代码；都不像填 "unsure"。
+  ⚠ 不要因为当前科目就是它，就默认这道题属于当前科目；这道题可能是别的科目的。`;
 
 const REVIEW_SYSTEM = `${REVIEW_RULES}
 
@@ -451,7 +528,7 @@ const REVIEW_STREAM_SYSTEM = `${REVIEW_RULES}
 
 输出格式（流式，必须严格遵守，否则前端解析不出来）：
 第 1 行只放一个 JSON，用 [[META]] 开头、[[/META]] 结尾，例如：
-[[META]]{"verdict":"unsolved","input_kind":"process","error_type":"none","cause":"你给的是解题过程，已作为提示参考","hints":["先写受力分析"],"related_kps":["牛顿第二定律","匀变速直线运动"]}[[/META]]
+[[META]]{"verdict":"unsolved","input_kind":"process","error_type":"none","cause":"你给的是解题过程，已作为提示参考","hints":["先写受力分析"],"related_kps":["牛顿第二定律","匀变速直线运动"],"subject_guess":"PHY2"}[[/META]]
 从第 2 行开始直接输出正文（Markdown + LaTeX），正文相当于 correction，
 必须完整、逐步、结尾含【扩充解析】。正文里不要再重复 META 或 JSON，也不要包代码块围栏。
 META 字段：
@@ -472,8 +549,15 @@ async function prepareReviewBase(
   correctAnswer?: string,
   images?: string[],
   profileText?: string,
+  filter: LearnedFilter = null,
 ): Promise<ReviewPrepBase> {
-  const hits = await retrieve(file, `${question} ${myAnswer}`.slice(0, 400), CITATION_LIMIT);
+  const hits = await retrieve(
+    file,
+    `${question} ${myAnswer}`.slice(0, 400),
+    CITATION_LIMIT,
+    undefined,
+    filter,
+  );
   const cfg = getLlmConfig("reason");
   const user = [
     `题目：${question}`,
@@ -505,6 +589,7 @@ export async function prepareReviewStream(
   images?: string[],
   profileText?: string,
   detail: Detail = "full",
+  filter: LearnedFilter = null,
 ): Promise<ReviewPrep> {
   const base = await prepareReviewBase(
     file,
@@ -513,6 +598,7 @@ export async function prepareReviewStream(
     correctAnswer,
     images,
     profileText,
+    filter,
   );
   return {
     ...base,
@@ -531,6 +617,7 @@ export async function review(
   images?: string[],
   profileText?: string,
   detail: Detail = "full",
+  filter: LearnedFilter = null,
 ): Promise<ReviewResult> {
   const base = await prepareReviewBase(
     file,
@@ -539,6 +626,7 @@ export async function review(
     correctAnswer,
     images,
     profileText,
+    filter,
   );
   const r = await llm("reason").chat.completions.create({
     model: base.model,
@@ -569,6 +657,7 @@ export async function review(
       correction: "",
       hints: [],
       related_kps: [],
+      subject_guess: "",
     };
   }
   return { ...parsed, references: base.citations, raw };

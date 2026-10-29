@@ -77,6 +77,17 @@ function persist(db: DatabaseSync, buffer: Buffer, mime: string, kind: string): 
   return Number(r.lastInsertRowid);
 }
 
+/**
+ * 只保存原图、不调用模型。
+ *
+ * 错题本要"优先显示用户截图"，所以存错题时必须把原图留下来；
+ * 只存视觉模型转录的文字，等于把用户给的证据换成模型的转述——模糊处一比就露馅。
+ */
+export function saveImageArtifact(db: DatabaseSync, dataUrl: string, kind = "mistake"): number {
+  const { mime, buffer } = parseDataUrl(dataUrl);
+  return persist(db, buffer, mime, kind);
+}
+
 export async function extractImage(
   db: DatabaseSync,
   dataUrl: string,

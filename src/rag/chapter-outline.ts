@@ -10,9 +10,29 @@ import { openTextbookDb } from "../db/index.js";
 
 export interface ChapterOutlineItem {
   chapterNo: number;
+  /** 合并用户改名后的名称：界面与模型都用这个 */
   title: string;
+  /** 教材库里的原名；「恢复原名」用 */
+  libraryTitle: string;
+  /** 是否被用户改过名 */
+  edited: boolean;
   /** 该章抽取的代表性术语，帮助模型对齐方法名，取切片开头若干字 */
   sample: string;
+}
+
+/**
+ * 把用户改的章名合进章节表。
+ * 只改 title，不动章号与 sample：门控靠章号，名称只影响模型对"这方法属于哪章"的判断。
+ */
+export function applyChapterNames(
+  items: ChapterOutlineItem[],
+  names: Map<number, string>,
+): ChapterOutlineItem[] {
+  if (names.size === 0) return items;
+  return items.map((i) => {
+    const title = names.get(i.chapterNo);
+    return title ? { ...i, title, edited: true } : i;
+  });
 }
 
 export function listChapterOutline(file: string): ChapterOutlineItem[] {
@@ -36,6 +56,8 @@ export function listChapterOutline(file: string): ChapterOutlineItem[] {
   return rows.map((r) => ({
     chapterNo: r.no,
     title: r.title,
+    libraryTitle: r.title,
+    edited: false,
     sample: (r.sample ?? "").replace(/\s+/g, " ").slice(0, 160),
   }));
 }
