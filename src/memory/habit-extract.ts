@@ -24,6 +24,12 @@ export const HABIT_DIMENSIONS = [
   "planning",
   "help_seeking",
   "attention",
+  /** 偏好时段 + 那个时段学什么（日程偏好：key=时段，value=做什么/怎么做） */
+  "study_window",
+  /** 某门课的课下投入占比（key=科目，value=0-1 或高/中/低；也用于"避开水课"） */
+  "investment",
+  /** 正在看的网课 / 在用的教辅（key=名称，value=类型+是否本地可用） */
+  "resource",
 ] as const;
 
 export type HabitDimension = (typeof HABIT_DIMENSIONS)[number];
@@ -248,8 +254,11 @@ export function rebuildHabitFromEvents(db: DatabaseSync): RebuildReport {
     groups.set(k, g);
   }
 
-  db.exec("DELETE FROM habit_evidence");
-  db.exec("DELETE FROM habit");
+  // 只清「模型推断出来的」那部分。
+  // 用户自述（source='manual'）和他的证据必须留：重算是拿事件流重算模型结论，
+  // 不该把用户明确说过的话删掉——那样他每填一次、后台跑一次就没了。
+  db.exec("DELETE FROM habit_evidence WHERE source_type <> 'user'");
+  db.exec("DELETE FROM habit WHERE source <> 'manual'");
 
   const insHabit = db.prepare(
     `INSERT INTO habit
@@ -259,13 +268,32 @@ export function rebuildHabitFromEvents(db: DatabaseSync): RebuildReport {
   const insEv = db.prepare(
     "INSERT INTO habit_evidence (habit_id, source_type, source_id, snippet, weight) VALUES (?,?,?,?,?)",
   );
+  // 用户自述优先：同一 (维度,key,科目,场景) 已经有自述时，模型结论不再插一条
+  const hasManual = db.prepare(
+    `SELECT 1 AS x FROM habit
+     WHERE source='manual' AND dimension = ? AND key = ?
+       AND COALESCE(course_code,'') = COALESCE(?,'')
+       AND COALESCE(context,'') = COALESCE(?,'')`,
+  );
 
   let habitCount = 0;
   let evCount = 0;
+  let skipped = 0;
   for (const g of groups.values()) {
     const n = g.evidence.length;
     const confidence = Math.min(CONFIDENCE_MAX, CONFIDENCE_MIN + CONFIDENCE_STEP * n);
     const status = g.rejected ? "rejected" : "active";
+    if (
+      hasManual.get(
+        g.payload.dimension,
+        g.payload.key,
+        g.payload.course ?? null,
+        g.payload.context ?? null,
+      )
+    ) {
+      skipped++;
+      continue;
+    }
     const r = insHabit.run(
       g.payload.dimension,
       g.payload.key,
@@ -283,6 +311,9 @@ export function rebuildHabitFromEvents(db: DatabaseSync): RebuildReport {
       insEv.run(habitId, e.sourceType, e.sourceId, e.snippet, 1);
       evCount++;
     }
+  }
+  if (skipped > 0) {
+    console.log(`[habit] 重建时跳过 ${skipped} 组模型结论（同一键已有用户自述，以用户为准）`);
   }
   return { habits: habitCount, evidence: evCount };
 }
@@ -321,10 +352,11 @@ export function injectableHabits(db: DatabaseSync, course: string) {
     .prepare(
       `SELECT * FROM habit
        WHERE status = 'active'
-         AND evidence_count >= ?
-         AND confidence >= ?
+         -- 用户自己填的（source='manual'）不受证据阈值限制：
+         -- 他明确说了「我 8-9 点写代码」，这一条比模型观察十次都可信
+         AND (source = 'manual' OR (evidence_count >= ? AND confidence >= ?))
          AND (course_code IS NULL OR course_code = ?)
-       ORDER BY dimension, confidence DESC`,
+       ORDER BY source = 'manual' DESC, dimension, confidence DESC`,
     )
     .all(INJECT_MIN_EVIDENCE, INJECT_MIN_CONFIDENCE, course) as unknown as Array<{
     id: number;

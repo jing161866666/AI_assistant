@@ -6,6 +6,8 @@ import {
   maxLearnedChapter,
 } from "./chapter-progress.js";
 import { injectableHabits } from "./habit-extract.js";
+import { listStudyWindows } from "./habit-manual.js";
+import { listResources, RESOURCE_KIND_LABEL } from "./resources.js";
 
 /**
  * 学生画像：每次回答前注入的"你面前这个人是谁"。
@@ -66,6 +68,16 @@ export interface Profile {
   preferences: PreferenceRow[];
   capacities: CapacityRow[];
   goals: GoalRow[];
+  /** 在用的网课/教辅（本课程 + 共用） */
+  resources: Array<{
+    course_code: string | null;
+    kind: string;
+    title: string;
+    local_status: string;
+    progress: number | null;
+  }>;
+  /** 偏好时段（自述优先）：日程排期与讲解风格都要参考 */
+  windows: Array<{ start: string | null; end: string | null; what: string; source: string }>;
 }
 
 const WD = ["一", "二", "三", "四", "五", "六", "日"];
@@ -78,6 +90,10 @@ const DIM_LABEL: Record<string, string> = {
   planning: "计划习惯",
   help_seeking: "求助方式",
   attention: "专注时长",
+  study_time: "偏好时段",
+  study_window: "偏好时段（学什么/怎么学）",
+  investment: "课下投入占比",
+  resource: "在用的网课/教辅",
 };
 
 export function loadProfile(
@@ -112,6 +128,19 @@ export function loadProfile(
     preferences,
     capacities,
     goals,
+    resources: listResources(db, courseCode).map((r) => ({
+      course_code: r.course_code,
+      kind: r.kind,
+      title: r.title,
+      local_status: r.local_status,
+      progress: r.progress,
+    })),
+    windows: listStudyWindows(db, courseCode).map((w) => ({
+      start: w.start,
+      end: w.end,
+      what: w.what,
+      source: w.source,
+    })),
   };
 }
 
@@ -146,9 +175,24 @@ export function progressFilter(p: Profile): Set<number> | null {
  * 组装注入提示词的画像文本。
  * 原则：短、可核对、每个结论带证据量。学生看这一段应当能认出自己。
  */
-export function profilePrompt(p: Profile): string {
+export function profilePrompt(
+  p: Profile,
+  /**
+   * 教材章节表（含用户改过的章名）。给了就写进画像，让模型按名称判断
+   * "这个方法属于哪一章、算不算超纲"；不给则只按章号约束。
+   */
+  outline?: Array<{ chapterNo: number; title: string }>,
+): string {
   const lines: string[] = ["【学生画像】"];
   lines.push(`科目：${p.courseName}（${p.courseCode}）`);
+
+  if (outline && outline.length > 0) {
+    lines.push(
+      `教材章节表（判断方法属于哪一章时以此为准，名称由学生按习惯命名）：\n${outline
+        .map((o) => `第${o.chapterNo}章 ${o.title}`)
+        .join("；")}`,
+    );
+  }
 
   // ── 进度 ──
   if (p.maxChapterNo == null) {
@@ -191,6 +235,36 @@ export function profilePrompt(p: Profile): string {
     }
   }
 
+  // ── 偏好时段（自述优先；排期与讲解都要参考） ──
+  if (p.windows.length) {
+    const items = p.windows
+      .filter((w) => w.start && w.end)
+      .map((w) => `${w.start}-${w.end} 偏好：${w.what}${w.source === "manual" ? "（自述）" : ""}`);
+    if (items.length) lines.push(`偏好时段（排任务时优先放这些时间）：${items.join("；")}`);
+  }
+
+  // ── 在用的资源（网课/教辅） ──
+  if (p.resources.length) {
+    const items = p.resources.slice(0, 8).map((r) => {
+      const kind = RESOURCE_KIND_LABEL[r.kind] ?? r.kind;
+      const scope = r.course_code ? "" : "（通识）";
+      const state =
+        r.local_status === "missing"
+          ? "·缺资源待上传"
+          : r.local_status === "available"
+            ? "·本地可用"
+            : "";
+      const prog = r.progress != null ? `·进度${Math.round(r.progress * 100)}%` : "";
+      return `${kind}《${r.title}》${scope}${state}${prog}`;
+    });
+    lines.push(`在用的学习资源：${items.join("；")}`);
+    if (p.resources.some((r) => r.local_status === "missing")) {
+      lines.push(
+        "（有资源本地缺失：如果讲解需要它，明确告诉学生「这份资料还没上传」，不要凭标题编内容）",
+      );
+    }
+  }
+
   // ── 时间偏好 ──
   if (p.preferences.length) {
     const items = p.preferences.map((r) => {
@@ -217,6 +291,67 @@ export function profilePrompt(p: Profile): string {
     lines.push(`目标：${items.join("；")}`);
   }
 
+  return lines.join("\n");
+}
+
+/**
+ * 一次装多个科目的画像（跨科目学习路径规划用）。
+ * 去重 + 忽略空值：调用方可能直接拿前端勾选的科目列表传进来。
+ */
+export function loadProfiles(db: DatabaseSync, courseCodes: string[]): Profile[] {
+  const seen = new Set<string>();
+  const out: Profile[] = [];
+  for (const raw of courseCodes) {
+    const code = raw.trim().toUpperCase();
+    if (!code || seen.has(code)) continue;
+    seen.add(code);
+    out.push(loadProfile(db, code));
+  }
+  return out;
+}
+
+/**
+ * 多科目画像文本。
+ *
+ * 与单科目的区别只有两点，但都关键：
+ *   1) 每个科目单独一段，进度/习惯按科目隔离，绝不合并成一个"总进度"；
+ *   2) 末尾给出跨科目约束——一个科目的方法只能用**该科目**的已学章节，
+ *      不能拿物理的进度去放行高数的内容。
+ */
+export function profilePromptMulti(profiles: Profile[]): string {
+  if (profiles.length === 0) return "【学生画像】\n（未选择任何科目）";
+  const only = profiles[0];
+  if (profiles.length === 1 && only) return profilePrompt(only);
+
+  const lines: string[] = ["【学生画像 · 多科目】"];
+  for (const p of profiles) {
+    lines.push(`\n■ ${p.courseName}（${p.courseCode}）`);
+    if (p.maxChapterNo == null) {
+      lines.push("  进度：尚未记录，讲课时按正常顺序并提醒学生设置进度");
+    } else {
+      const learned = [...p.learned].sort((a, b) => a - b);
+      lines.push(`  进度：已学到第 ${p.maxChapterNo} 章（已学：${learned.join("、") || "无"}）`);
+      const gaps = gapsOf(p);
+      if (gaps.length) lines.push(`  跳过未学：第 ${gaps.join("、")} 章`);
+    }
+    if (p.habits.length) {
+      const byDim = new Map<string, string[]>();
+      for (const h of p.habits) {
+        const label = DIM_LABEL[h.dimension] ?? h.dimension;
+        byDim.set(label, [...(byDim.get(label) ?? []), `${h.key}→${h.value}`]);
+      }
+      lines.push(`  习惯：${[...byDim].map(([k, v]) => `${k} ${v.join("、")}`).join("；")}`);
+    }
+    if (p.goals.length) {
+      lines.push(`  目标：${p.goals.map((g) => g.title).join("；")}`);
+    }
+  }
+  lines.push(
+    "\n跨科目约束：",
+    "- 每个科目的方法只能用该科目自己的已学章节；门控按科目分别执行，不得把一个科目的进度套到另一个科目上。",
+    "- 排顺序时先排前置科目（如数学基础），再排依赖它的科目内容。",
+    "- 每一条计划都要写明所属科目，跨科目条目不能混为一条。",
+  );
   return lines.join("\n");
 }
 

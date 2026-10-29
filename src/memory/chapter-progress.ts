@@ -29,6 +29,23 @@ export function listChapterProgress(db: DatabaseSync, courseCode: string): Chapt
     .all(courseCode) as unknown as ChapterProgress[];
 }
 
+/**
+ * 清空一门课的章节进度：整行删除，而不是逐章写 not_started。
+ *
+ * 逐章写会留下 1..40 的空行，界面上就成了"默认 34/40 章"——
+ * 用户点一次清空，反而凭空多出一堆不存在的章节。
+ * 这里直接删掉该科目的全部行；event 只记一条，可追溯。
+ */
+export function clearChapterProgress(db: DatabaseSync, courseCode: string): number {
+  const r = db.prepare("DELETE FROM chapter_progress WHERE course_code = ?").run(courseCode);
+  db.prepare("INSERT INTO event (type, ref_type, payload) VALUES (?,?,?)").run(
+    "progress_cleared",
+    "chapter_progress",
+    JSON.stringify({ course: courseCode, removed: Number(r.changes) }),
+  );
+  return Number(r.changes);
+}
+
 export interface SetProgressInput {
   courseCode: string;
   chapterNo: number;
