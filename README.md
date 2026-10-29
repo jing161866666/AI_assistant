@@ -66,21 +66,24 @@ Copy-Item .env.example .env
 
 ### 模型名必须实测，不能抄文档
 
-不同账号的模型池差异很大。本机实测（2026-07，百炼 compatible-mode）：
+不同账号的模型池差异很大。当前分工是**两家供应商**（详细依据与踩坑见 **[模型应用.md](模型应用.md)**）：
 
-| 角色 | 实际可用 | 不可用 |
-|---|---|---|
-| reason | `qwen3.8-max` | — |
-| extract | `qwen-flash` | `qwen-turbo`（429 限流） |
-| vision | `qwen3-vl-plus` | `qwen-vl-max`（404 不存在） |
-| embed | `qwen3.7-text-embedding`（dim=1024） | — |
+| 角色 | 任务 | 模型 | 供应商 |
+|---|---|---|---|
+| reason | 解题（smart）、判对错 | `deepseek-reasoner` | DeepSeek |
+| fast | 用户选「快答」 | `deepseek-chat` | DeepSeek |
+| extract | 排日程、习惯抽取、举一反三 | `deepseek-chat` | DeepSeek |
+| vision | 看图 / 转录 | `qwen3-vl-plus` | qwen（百炼） |
+| embed | 向量化 | `qwen3.7-text-embedding`（dim=1024） | qwen（百炼） |
 
 ```powershell
-npm run probe      # 拉 /v1/models 并逐个实测，输出可用模型
-npm run test-llm   # 用真实代码路径验证四个角色
+npm run probe        # 拉 /v1/models 并逐个实测，输出可用模型
+npm run test-llm     # 用真实代码路径验证五个角色
+npm run bench:grade  # 判对错专项：错答案必须判错，否则禁止换模型
 ```
 
-换 Key 或换账号后**先跑这两个命令**，再改 `.env`。
+换 Key、换账号或换模型后**先跑这几条**，再改 `.env`。特别注意：`FAST_*` 没配时
+`reason`/`extract` 会回退到 qwen 的地址，但模型名仍是 `deepseek-*`，对端直接 400。
 
 ---
 
@@ -145,18 +148,116 @@ Invoke-RestMethod -Uri http://127.0.0.1:8787/api/profile -Method Post `
 
 ## 六、当前进度
 
+> 三阶段的门禁、步骤、验收标准见 **[TASKS.md](TASKS.md)**（任务总流程）。
+
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
-| M1 | 教材检索 + 解题 + 改错 + 错题本 | 骨架完成，待接模型 |
-| M2 | 习惯分析 + 进度 + 日程 + 学习路径 + 生成习题 | 表已就绪，逻辑待写 |
+| M1 | 教材检索 + 解题 + 改错 + 错题本 | 已跑通，可用（教材库仅《大学物理(B)II》下册） |
+| M2 | 习惯分析 + 进度 + 日程 + 学习路径 + 生成习题 | 进行中：进度与注入已落地，闸门 L1 与习惯抽取未做 |
 | M3 | 教师端脱敏聚合 + 报告导出 + 汇聚端 | 未开始 |
 
-### 待办
+M2 的剩余工作见 **[M2.md](M2.md)** 第八节「现状差距」（P0 三项：检索期章节过滤、已学集合判定、去掉 `PHY2` 静默默认）。
 
-- [ ] `src/rag/` 混合检索（FTS5 + 向量余弦，RRF 融合）
-- [ ] `src/llm/` 四角色调用封装（含 zod 校验的结构化抽取）
-- [ ] `src/upload/` PDF / DOCX / 图片解析与切片
-- [ ] `scripts/build-textbook.ts` 教材库构建脚本
-- [ ] `src/memory/` 上下文组装（每次回答按习惯 + 进度注入）
-- [ ] `web/` 前端（Vite + React）
-- [ ] `scripts/export-report.ts` 教师反馈导出
+---
+
+## 七、分享给别人看（给同事演示）
+
+默认只监听 `127.0.0.1`，别人打不开。三种给同事看的方式，从省事到正式：
+
+### 方式 A：同一 Wi-Fi，直接开端口（最简单）
+
+```powershell
+# 先停掉原来那个 127.0.0.1 的实例（Ctrl+C），再：
+npm run share
+```
+
+启动后会打印一行 `局域网可访问 http://<你的内网IP>:8787/`，把这个地址发给同事就行。
+
+前提与坑：
+
+- 必须在**同一网段**（同一个 Wi-Fi/路由器）。校园网（如 SEU-WLAN）常开客户端隔离，别人会连不上——此时用手机热点给两边连着试。
+- 防火墙：当前网络为「公用」时，Windows 已为 Node.js 放行入站。若被拦，管理员 PowerShell 执行：
+  ```powershell
+  New-NetFirewallRule -DisplayName "AI学习伙伴 8787" -Direction Inbound -Protocol TCP -LocalPort 8787 -Action Allow
+  ```
+- 演示完 `Ctrl+C` 关掉即可；默认值仍是 `127.0.0.1`，不会一直敞开。
+
+### 方式 B：临时公网隧道（远程同事 / 不想暴露整个网段）
+
+不改代码、不开防火墙，本机服务保持 `127.0.0.1`：
+
+```powershell
+winget install --id Cloudflare.cloudflared    # 首次
+cloudflared tunnel --url http://127.0.0.1:8787
+```
+
+命令会打印一个 `https://xxx-xxx.trycloudflare.com` 地址，发给谁都能打开（含手机）。关掉命令窗口即失效。
+
+### 方式 C：没网络条件
+
+`npm start` 打开后截图/录屏，重点截「解题带教材引用」「改错归因」「错题本」三页。
+
+### 演示之前：先把数据隔离出来
+
+**这个服务没有任何登录验证**，而 `data/learner.db` 里是你的真实对话、错题原文与上传文件。给团队看时用一份临时库，别把自己的记忆库摆出去：
+
+```powershell
+$env:DB_PATH = "./data/demo/learner.db"
+npm run init-db      # 建一个空库
+npm run share
+```
+
+另一个坑：`profile` 表是**单用户单行**，同一个实例多人访问会共用一份画像和错题本——同事的测试题会写进这份库。所以演示就用空库，别接着自己的真实库讲。
+
+真要多人各用各的数据，那是加账号体系的事，别在演示里硬撑。
+
+---
+
+## 八、把教材库给同事（只给代码是不够的）
+
+`data/textbook/*.db` 是**构建产物**，被 gitignore（版权 + 体积）。同事 clone 完代码、
+界面跑得起来，但一问教材就是空的——这不是 bug，是缺文件。所以教材库要单独分发。
+
+### 出包方：一条命令
+
+```powershell
+npm run pack:textbook
+# → dist/textbook-pack/   5 个库 + manifest.json，约 32 MB
+```
+
+打包不是裸拷贝，而是 `VACUUM INTO` 导出的干净副本（原库是 WAL 模式，直接拷贝
+可能丢掉未 checkpoint 的页），并把每个文件的 sha256 写进 `manifest.json`。
+空库（0 chunk 的占位）会自动跳过——发出去只会在别人库里多出假科目。
+
+### 接收方：两条命令
+
+```powershell
+# 网盘 / 内网共享 / 优盘，指向那个目录都行
+npm run fetch:textbook -- --from D:\共享\textbook-pack
+
+# 若目录挂在 HTTP 上（内网静态服务即可，不需要写后端）
+npm run fetch:textbook -- --url https://some-host/textbook-pack
+```
+
+然后确认：
+
+```powershell
+npm run check:textbook
+```
+
+它会逐个库断言：meta 齐全 → chunk 数与 meta 一致 → 每条 chunk 都有同维度向量 →
+FTS 索引条数一致 → 抽查一次 `MATCH` 真的能命中。这几项正好覆盖「检索返回空」
+和「结果莫名其妙」的全部常见原因。
+
+### 三条硬要求
+
+1. **embedding 必须一致。** 教材库是 `qwen3.7-text-embedding` @ 1024 维预构建的。
+   若 `.env` 里 `EMBED_DIM` 不是 1024，`fetch:textbook` 会**直接拒绝**而不是警告——
+   维度不一致时检索不会报错，只会静默返回一堆无关段落，比崩溃更难发现。
+2. **还要一个百炼 Key。** 检索要先把问题算成向量，没有 key 连检索都进不去。
+   光有教材库走不到「解题带引用」。
+3. **装完重启服务。** 新库在服务启动时才会自动登记成科目（`syncSubjectsFromTextbooks`）。
+
+`manifest.json` 里有 sha256，所以传输通道不需要可信：优盘、微信、网盘都行，
+损坏或被改过的文件会在解包时被挡住。也**不需要**为此搭下载站。
+
