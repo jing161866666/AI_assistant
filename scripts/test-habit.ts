@@ -1,13 +1,23 @@
 import "dotenv/config";
 import assert from "node:assert/strict";
-import { getLearnerDb } from "../src/db/index.js";
-import {
-  extractHabits,
-  injectableHabits,
-  rebuildHabitFromEvents,
-  rejectHabit,
-} from "../src/memory/habit-extract.js";
-import { loadProfile, profilePrompt } from "../src/memory/profile.js";
+import { rmSync } from "node:fs";
+
+/**
+ * 习惯抽取自测。
+ *
+ * 必须用独立 learner 库：以前跑在 data/learner.db 上，结尾还会 DELETE FROM habit /
+ * habit_evidence / habit_* 事件，等于每跑一次 `npm run check` 就清空用户的真实习惯。
+ * 现在先改 DB_PATH，再动态 import 业务模块（静态 import 会提前打开真实库）。
+ */
+process.env.DB_PATH = `./data/test-habit-${process.pid}.db`;
+
+const { getLearnerDb } = await import("../src/db/index.js");
+const { extractHabits, injectableHabits, rebuildHabitFromEvents, rejectHabit } = await import(
+  "../src/memory/habit-extract.js"
+);
+const { awaitHabitIdle, habitQueueState, recentHabitRuns, recordAction, setHabitExtractor } =
+  await import("../src/memory/habit-pipeline.js");
+const { loadProfile, profilePrompt } = await import("../src/memory/profile.js");
 
 const db = getLearnerDb();
 const C = "PHY2";
@@ -106,7 +116,9 @@ async function main(): Promise<void> {
   console.log("\n【3】重算幂等（有事件时）");
   const a = rebuildHabitFromEvents(db);
   const b = rebuildHabitFromEvents(db);
-  console.log(`      第一次 ${a.habits} 条 / ${a.evidence} 证据；第二次 ${b.habits} 条 / ${b.evidence} 证据`);
+  console.log(
+    `      第一次 ${a.habits} 条 / ${a.evidence} 证据；第二次 ${b.habits} 条 / ${b.evidence} 证据`,
+  );
   await check("两次重算结果完全一致", () => {
     assert.deepEqual(a, b);
   });
@@ -128,9 +140,12 @@ async function main(): Promise<void> {
   });
 
   console.log("\n【4】证据阈值（≥2 且 ≥0.6 才注入）");
-  const all = db
-    .prepare("SELECT id, key, evidence_count, confidence FROM habit")
-    .all() as Array<{ id: number; key: string; evidence_count: number; confidence: number }>;
+  const all = db.prepare("SELECT id, key, evidence_count, confidence FROM habit").all() as Array<{
+    id: number;
+    key: string;
+    evidence_count: number;
+    confidence: number;
+  }>;
   console.log(
     `      全部习惯: ${all.map((h) => `${h.key}(${h.evidence_count}条,${h.confidence})`).join("; ") || "无"}`,
   );
@@ -151,7 +166,9 @@ async function main(): Promise<void> {
     c: number;
   };
   if (before.c > 0) {
-    const h = db.prepare("SELECT id, evidence_count FROM habit WHERE key = ?").get("含义:累加器") as {
+    const h = db
+      .prepare("SELECT id, evidence_count FROM habit WHERE key = ?")
+      .get("含义:累加器") as {
       id: number;
       evidence_count: number;
     };
@@ -219,7 +236,89 @@ async function main(): Promise<void> {
   db.prepare("DELETE FROM habit_evidence").run();
   db.prepare("DELETE FROM event WHERE type LIKE 'habit_%'").run();
 
+  console.log("\n【8】管线：每个操作都留痕 + awaitHabitIdle 真的会等");
+  // 用假抽取器：本节验证的是排队/留痕/等待，不打模型（省时省钱且可复现）
+  setHabitExtractor(async () => {
+    await new Promise((r) => setTimeout(r, 120));
+    return { habits: [], enoughEvidence: false, model: "fake", ms: 120, written: 0 };
+  });
+
+  const short = recordAction(db, {
+    action: "推进学习进度",
+    text: "把进度推到第 3 章",
+    kind: "chat",
+    course: C,
+    sourceType: "progress",
+  });
+  await check("太短的材料不调模型，但写 habit_skip 留痕", () => {
+    assert.equal(short.queued, false);
+    const n = (
+      db.prepare("SELECT COUNT(*) c FROM event WHERE type = 'habit_skip'").get() as { c: number }
+    ).c;
+    assert.ok(n >= 1, "没有 habit_skip 事件");
+  });
+
+  const material = `我习惯把下标写成 i，把累加器写成 sum，临时变量一律叫 tmp。${"补充说明。".repeat(6)}`;
+  const queued = recordAction(db, {
+    action: "测试材料",
+    text: material,
+    kind: "code",
+    course: C,
+    sourceType: "test_material",
+    sourceId: 9001,
+  });
+  await check("够长的材料进入抽取队列", () => {
+    assert.equal(queued.queued, true, `未投递：${queued.reason ?? ""}`);
+  });
+
+  const idle = await awaitHabitIdle(20_000);
+  await check("awaitHabitIdle 等到真正空闲（不是空转返回）", () => {
+    assert.equal(idle, true, "等待超时");
+    assert.equal(habitQueueState().running, false);
+    assert.equal(habitQueueState().pending, 0);
+  });
+  await check("每次尝试都写 habit_extract 事件（成功也留痕）", () => {
+    const n = (
+      db.prepare("SELECT COUNT(*) c FROM event WHERE type = 'habit_extract'").get() as { c: number }
+    ).c;
+    assert.ok(n >= 1, "没有 habit_extract 事件");
+  });
+  await check("recentHabitRuns 能读出这次尝试", () => {
+    const runs = recentHabitRuns(db, 8);
+    const hit = runs.find((r) => r.sourceType === "test_material");
+    assert.ok(hit, `没找到测试材料的记录：${runs.map((r) => r.sourceType).join(",")}`);
+    assert.equal(hit?.candidates, 0);
+    assert.equal(hit?.enough, false);
+    assert.equal(hit?.error, null);
+  });
+  await check("抽取失败也会留痕（error 字段）", async () => {
+    setHabitExtractor(async () => {
+      throw new Error("模拟模型 429");
+    });
+    recordAction(db, {
+      action: "失败材料",
+      text: `这是一段会失败的材料，用来验证错误是否被记录。${"x".repeat(20)}`,
+      kind: "chat",
+      course: C,
+      sourceType: "test_failure",
+      sourceId: 9002,
+    });
+    await awaitHabitIdle(20_000);
+    const runs = recentHabitRuns(db, 8);
+    const failed = runs.find((r) => r.sourceType === "test_failure");
+    assert.ok(failed, "失败的那次没留痕");
+    assert.match(String(failed?.error), /429/);
+  });
+
+  db.prepare("DELETE FROM habit").run();
+  db.prepare("DELETE FROM habit_evidence").run();
+  db.prepare("DELETE FROM event WHERE type LIKE 'habit_%'").run();
+
   console.log(`\n${"─".repeat(56)}\n通过 ${pass} 项，失败 ${fail} 项`);
+  db.close();
+  for (const suffix of ["", "-wal", "-shm"]) {
+    rmSync(`./data/test-habit-${process.pid}.db${suffix}`, { force: true });
+  }
   process.exit(fail === 0 ? 0 : 1);
 }
 

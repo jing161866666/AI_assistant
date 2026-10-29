@@ -1,15 +1,35 @@
 import "dotenv/config";
 import assert from "node:assert/strict";
-import { getLearnerDb } from "../src/db/index.js";
-import {
-  advanceTo,
-  learnedChapterSet,
-  maxLearnedChapter,
-  setChapterProgress,
-} from "../src/memory/chapter-progress.js";
-import { isLearned, loadProfile, profilePrompt } from "../src/memory/profile.js";
-import { listChapterOutline } from "../src/rag/chapter-outline.js";
-import { guardProgress } from "../src/rag/progress-guard.js";
+import { existsSync, rmSync } from "node:fs";
+import { resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+
+/**
+ * M2 自测。
+ *
+ * 以前直接跑在 data/learner.db 上，开头 `DELETE FROM habit` 会清空用户的真实习惯。
+ * 现在先用 VACUUM INTO 把真实库快照到临时库，所有读写都在快照上做，结束后删掉。
+ */
+const TMP_DB = resolve(`data/test-m2-${process.pid}.db`);
+for (const s of ["", "-wal", "-shm"]) rmSync(TMP_DB + s, { force: true });
+const REAL_DB = resolve("data/learner.db");
+if (existsSync(REAL_DB)) {
+  const src = new DatabaseSync(REAL_DB, { readOnly: true });
+  try {
+    src.exec(`VACUUM INTO '${TMP_DB.replace(/\\/g, "/")}'`);
+  } finally {
+    src.close();
+  }
+}
+process.env.DB_PATH = TMP_DB;
+
+const { getLearnerDb } = await import("../src/db/index.js");
+const { advanceTo, learnedChapterSet, maxLearnedChapter, setChapterProgress } = await import(
+  "../src/memory/chapter-progress.js"
+);
+const { isLearned, loadProfile, profilePrompt } = await import("../src/memory/profile.js");
+const { listChapterOutline } = await import("../src/rag/chapter-outline.js");
+const { classifyBeyond, guardProgress } = await import("../src/rag/progress-guard.js");
 
 const db = getLearnerDb();
 const COURSE = "PHY2";
@@ -115,34 +135,113 @@ async function main(): Promise<void> {
   });
   const withinAnswer =
     "由光程差 $\\Delta = 2nd + \\lambda/2$，相长条件 $2nd+\\lambda/2 = k\\lambda$，最小膜厚 $d=\\lambda/(4n)$。";
-  await check("薄膜干涉题不应判越界", async () => {
-    const g = await guardProgress("求增透膜的最小厚度", withinAnswer, 11, outline);
-    assert.equal(g.beyond.length, 0, `误判越界: ${JSON.stringify(g.beyond)}`);
-  });
+  /** 已学集合：第 9–11、15 章（第 12–14 章未学，故意不连续——14 章是库里的断层） */
+  const learned = new Set([9, 10, 11, 15]);
 
-  const beyondAnswer =
-    "由德布罗意关系 $\\lambda = h/p$，并结合不确定性原理 $\\Delta x \\Delta p \\ge \\hbar/2$，得电子被限制在 $\\Delta x$ 时动量不确定度显著。";
-  await check("用德布罗意/不确定性原理应判越界", async () => {
-    const g = await guardProgress(
-      "估算电子被限制在 0.1nm 时的动量不确定度",
-      beyondAnswer,
-      11,
+  console.log("\n【4-1】过滤规则（纯函数，不依赖模型，可稳定回归）");
+  await check("已学章节不算越界（第 15 章即使被模型点名也剔除）", () => {
+    const r = classifyBeyond(
+      [{ topic: "德布罗意关系", chapter_no: 15, why: "第15章" }],
+      false,
+      learned,
       outline,
     );
-    assert.ok(g.beyond.length > 0, "应检出越界但没检出");
-    console.log(
-      `      检出: ${g.beyond.map((b) => `${b.topic}(第${b.chapter_no ?? "?"}章)`).join("、")}`,
+    assert.equal(r.beyond.length, 0);
+    assert.equal(r.uncertain.length, 0);
+    assert.equal(r.allWithin, true);
+  });
+
+  await check("未学章节算越界（第 13 章）", () => {
+    const r = classifyBeyond(
+      [{ topic: "热力学第一定律", chapter_no: 13, why: "未学" }],
+      false,
+      learned,
+      outline,
     );
+    assert.equal(r.beyond.length, 1);
+    assert.equal(r.allWithin, false);
+  });
+
+  await check("定位不到章节 → uncertain，不许静默丢掉越界信号", () => {
+    const r = classifyBeyond(
+      [{ topic: "热力学第一定律", chapter_no: null, why: "方法未在已学章内" }],
+      false,
+      learned,
+      outline,
+    );
+    assert.equal(r.beyond.length, 0);
+    assert.equal(r.uncertain.length, 1, "存疑项被丢掉了");
+    assert.equal(r.allWithin, false, "模型说不是全部在范围内，不能对外宣称没有越界");
+  });
+
+  await check("章节表外的编号也归入 uncertain（不当作有效章节）", () => {
+    const r = classifyBeyond(
+      [{ topic: "某个方法", chapter_no: 99, why: "表里没有" }],
+      false,
+      learned,
+      outline,
+    );
+    assert.equal(r.beyond.length, 0);
+    assert.equal(r.uncertain.length, 1);
+    assert.equal(r.uncertain[0]!.chapter_no, null);
+  });
+
+  await check("模型整体判定 all_within=true 时，不因存疑项过度报警", () => {
+    const r = classifyBeyond(
+      [{ topic: "微积分", chapter_no: null, why: "初等运算" }],
+      true,
+      learned,
+      outline,
+    );
+    assert.equal(r.uncertain.length, 0);
+    assert.equal(r.allWithin, true);
+  });
+
+  console.log("\n【4-2】真实模型调用（判定的稳定性由上面的纯函数兜底）");
+  await check("薄膜干涉题不应判越界", async () => {
+    const g = await guardProgress("求增透膜的最小厚度", withinAnswer, learned, outline);
+    assert.equal(g.beyond.length, 0, `误判越界: ${JSON.stringify(g.beyond)}`);
+    assert.equal(g.uncertain.length, 0, `误报可能越界: ${JSON.stringify(g.uncertain)}`);
+    assert.equal(g.guard, "ok");
+  });
+
+  /** 第 12/13 章（热学 / 热力学）没学：不管模型能不能定位到章节，都必须有信号 */
+  const thermoAnswer =
+    "热力学第一定律 $Q = \\Delta U + W$，等温过程 $\\Delta U = 0$，故 $Q = W = nRT\\ln(V_2/V_1)$。";
+  await check("用热力学（第 12/13 章，未学）必须提示越界", async () => {
+    const g = await guardProgress("理想气体等温膨胀做功多少", thermoAnswer, learned, outline);
+    const flagged = g.beyond.length + g.uncertain.length;
+    assert.ok(flagged > 0, "模型说没问题，越界信号被吞掉了");
+    assert.equal(g.guard, "ok");
+    console.log(
+      `      确定越界: ${g.beyond.map((b) => `${b.topic}(第${b.chapter_no}章)`).join("、") || "无"}；` +
+        `可能越界: ${g.uncertain.map((b) => b.topic).join("、") || "无"}`,
+    );
+  });
+
+  await check("德布罗意（第 15 章，已学）不得算确定越界", async () => {
+    const g = await guardProgress(
+      "求电子的德布罗意波长",
+      "由 $\\lambda = h/p$，得波长与动量成反比。",
+      learned,
+      outline,
+    );
+    assert.equal(g.beyond.length, 0, `已学章节被误判: ${JSON.stringify(g.beyond)}`);
+    assert.equal(g.guard, "ok");
   });
 
   await check("未设进度（null）时直接放行不调用模型", async () => {
     const g = await guardProgress("任意题", "任意答案", null, outline);
     assert.equal(g.beyond.length, 0);
+    assert.equal(g.uncertain.length, 0);
     assert.equal(g.allWithin, true);
+    assert.equal(g.guard, "no-progress");
   });
 
   db.prepare("DELETE FROM habit").run();
   console.log(`\n${"─".repeat(56)}\n通过 ${pass} 项，失败 ${fail} 项`);
+  db.close();
+  for (const s of ["", "-wal", "-shm"]) rmSync(TMP_DB + s, { force: true });
   process.exit(fail === 0 ? 0 : 1);
 }
 

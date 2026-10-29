@@ -31,14 +31,15 @@ async function probe(role: string, model: string, fn: () => Promise<string>): Pr
 }
 
 async function main(): Promise<void> {
-  // 1) 讲解模型：最小对话
+  // 1) 讲解模型：最小对话（reasoning 型模型会先花 token 思考，max_tokens 给小了正文会是空）
   await probe("reason", getLlmConfig("reason").model, async () => {
     const r = await llm("reason").chat.completions.create({
       model: getLlmConfig("reason").model,
       messages: [{ role: "user", content: "只回复两个字：收到" }],
-      max_tokens: 16,
+      max_tokens: 200,
     });
     const txt = r.choices[0]?.message?.content?.trim() ?? "";
+    if (!txt) throw new Error("返回正文为空：思考过程吃光了 max_tokens，调大再测");
     return `"${txt}" tokens=${r.usage?.total_tokens ?? "?"}`;
   });
 
@@ -59,6 +60,16 @@ async function main(): Promise<void> {
     const txt = r.choices[0]?.message?.content?.trim() ?? "";
     JSON.parse(txt); // 校验真的是合法 JSON
     return txt.slice(0, 80);
+  });
+
+  // 2b) 快答模型：用户主动选「快答」时走它，必须独立于 reason 可用
+  await probe("fast", getLlmConfig("fast").model, async () => {
+    const r = await llm("fast").chat.completions.create({
+      model: getLlmConfig("fast").model,
+      messages: [{ role: "user", content: "只回复两个字：收到" }],
+      max_tokens: 16,
+    });
+    return `"${r.choices[0]?.message?.content?.trim() ?? ""}"`;
   });
 
   // 3) 视觉模型：不传图，仅验证模型是否存在可调用
@@ -100,7 +111,7 @@ async function main(): Promise<void> {
 
   const bad = results.filter((r) => !r.ok);
   if (bad.length === 0) {
-    console.log("四个角色全部可用。");
+    console.log("五个角色全部可用。");
   } else {
     console.log(`${bad.length} 个角色不可用，需检查模型名或 Key 权限。`);
   }
