@@ -9,11 +9,14 @@ import {
   insertSchedule,
   listCapacity,
   listPreferences,
+  listSchedule,
   planStudy,
   resolveWeek,
   toTime,
   weekdayOf,
 } from "./service.js";
+import type { ScheduleRow } from "./types.js";
+import { createSchedule, deleteSchedule, updateSchedule } from "./write.js";
 
 /**
  * 模型可调用的日程表接口。
@@ -128,30 +131,68 @@ export interface DayView {
   weekday: string;
   week: number;
   blocks: Array<{
+    /** 日程行 id：模型要改/删某条时用它，不要在正文里猜 */
+    id: number;
     title: string;
     start: string;
     end: string;
     category: string;
     intent: string | null;
+    /** 0 不可动 / 1 可微调 / 2 可被学习计划占用 */
+    flexibility: number | null;
+    recurring: number | null;
+    weekday_no: number | null;
+    date: string | null;
+    week_start: number | null;
+    week_end: number | null;
+    week_parity: string | null;
+    location: string | null;
+    source: string | null;
+    locked: number | null;
+    /** 调课/补课产生的临时块不可按 id 编辑整条系列 */
+    fromException: boolean;
+    fromMakeup: boolean;
   }>;
   free: Array<{ start: string; end: string; minutes: number; warning: string | null }>;
 }
 
-function dayView(db: DatabaseSync, occs: ReturnType<typeof expandOccurrences>, d: string): DayView {
+function dayView(
+  db: DatabaseSync,
+  occs: ReturnType<typeof expandOccurrences>,
+  d: string,
+  rows?: Map<number, ScheduleRow>,
+): DayView {
   const term = getActiveTerm(db);
+  const byId = rows ?? new Map(listSchedule(db).map((r) => [r.id, r]));
   return {
     date: d,
     weekday: WEEKDAY_NAMES[weekdayOf(d) - 1]!,
     week: resolveWeek(d, term.start_date),
     blocks: occs
       .filter((o) => o.date === d)
-      .map((o) => ({
-        title: o.title,
-        start: o.start,
-        end: o.end,
-        category: o.category,
-        intent: o.intent,
-      })),
+      .map((o) => {
+        const r = byId.get(o.scheduleId);
+        return {
+          id: o.scheduleId,
+          title: o.title,
+          start: o.start,
+          end: o.end,
+          category: o.category,
+          intent: o.intent,
+          flexibility: r?.flexibility ?? null,
+          recurring: r?.recurring ?? null,
+          weekday_no: r?.weekday ?? null,
+          date: r?.date ?? null,
+          week_start: r?.week_start ?? null,
+          week_end: r?.week_end ?? null,
+          week_parity: r?.week_parity ?? null,
+          location: r?.location ?? null,
+          source: r?.source ?? null,
+          locked: r?.locked ?? null,
+          fromException: o.fromException ?? false,
+          fromMakeup: o.fromMakeup ?? false,
+        };
+      }),
     free: freeSlotsOn(db, occs, d).map((s) => ({
       start: s.start,
       end: s.end,
@@ -171,13 +212,14 @@ export function runTool(db: DatabaseSync, name: string, args: unknown): unknown 
       const from = a.from as string;
       const to = (a.to as string | undefined) ?? from;
       const occs = expandOccurrences(db, from, to);
+      const rows = new Map(listSchedule(db).map((r) => [r.id, r]));
       const days: DayView[] = [];
-      for (let d = from; d <= to; d = addDays(d, 1)) days.push(dayView(db, occs, d));
+      for (let d = from; d <= to; d = addDays(d, 1)) days.push(dayView(db, occs, d, rows));
       return { days };
     }
 
     case "schedule_add": {
-      const id = insertSchedule(db, {
+      const id = createSchedule(db, {
         title: a.title as string,
         category: a.category as string,
         type: (a.type as string | undefined) ?? "other",
@@ -193,33 +235,36 @@ export function runTool(db: DatabaseSync, name: string, args: unknown): unknown 
         location: (a.location as string | undefined) ?? null,
         recurring: a.weekday != null ? 1 : 0,
         source: "generated",
+        // 模型写的不算"用户手改"，让用户仍可自由覆盖
+        locked: 0,
       });
       return { ok: true, id };
     }
 
     case "schedule_update": {
       const id = a.id as number;
-      const row = db.prepare("SELECT * FROM schedule WHERE id = ?").get(id);
-      if (!row) throw new Error(`不存在 id=${id}`);
-      const sets: string[] = [];
-      const vals: Array<string | number | null> = [];
-      for (const k of ["start_time", "end_time", "weekday", "flexibility", "intent"]) {
-        const v = a[k];
-        if (v !== undefined) {
-          sets.push(`${k} = ?`);
-          vals.push(v as string | number | null);
-        }
-      }
-      sets.push("locked = 1");
-      db.prepare(`UPDATE schedule SET ${sets.join(", ")} WHERE id = ?`).run(...vals, id);
+      updateSchedule(db, id, {
+        start_time: a.start_time as string | undefined,
+        end_time: a.end_time as string | undefined,
+        weekday: a.weekday as number | undefined,
+        flexibility: a.flexibility != null ? Number(a.flexibility) : undefined,
+        intent: a.intent as string | undefined,
+        locked: 1,
+      });
       return { ok: true, id, locked: true };
     }
 
     case "schedule_remove": {
       const id = a.id as number;
-      const r = db.prepare("DELETE FROM schedule WHERE id = ? AND locked = 0").run(id);
-      if (Number(r.changes) === 0) {
-        return { ok: false, reason: "该条目已被用户手动修改（locked），需用户确认后才能删除" };
+      const ok = deleteSchedule(db, id, { requireUnlocked: true });
+      if (!ok) {
+        const exists = db.prepare("SELECT 1 AS x FROM schedule WHERE id = ?").get(id);
+        return {
+          ok: false,
+          reason: exists
+            ? "该条目已被用户手动修改（locked），需用户确认后才能删除"
+            : `不存在 id=${id} 的日程`,
+        };
       }
       return { ok: true, id };
     }

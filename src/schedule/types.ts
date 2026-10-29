@@ -55,6 +55,8 @@ export interface Occurrence {
   end: string;
   minutes: number;
   title: string;
+  /** 所属科目代码（排期按课程分配分钟数要用） */
+  course_code: string | null;
   type: string;
   category: Category;
   flexibility: Flexibility;
