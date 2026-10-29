@@ -3,28 +3,44 @@ node_modules/
 .npm-cache/
 dist/
 
-# 密钥与凭据（绝不可提交）
+# ── 密钥与凭据：绝不可提交 ──────────────────────────────
+# .env 里是真实的模型 Key（LLM/FAST/EMBED 三把），.fb_token 是教材镜像站凭据。
+# 用户自己的 Key 由设置页写进 data/settings.json（见下），也不入库。
 .env
-.env.local
+.env.*
+!.env.example
 .fb_token
 
-# 数据库（可重建，且含个人隐私）
-data/*.db
-data/*.db-wal
-data/*.db-shm
-data/textbook/*.db
-data/textbook/*.db-wal
-data/textbook/*.db-shm
+# ── 数据库：可重建，且含个人隐私 ────────────────────────
+# 用 data/**/ 而不是 data/*.db：后者只匹配一层，
+# data/test-fetch/course-phy.db 这类两层路径会漏（踩过）。
+data/**/*.db
+data/**/*.db-wal
+data/**/*.db-shm
+data/**/*.db-journal
+# SQLite 备份与构建中间产物
+data/*.db.bak-*
+data/**/*.db.bak-*
+data/**/*.building
+# 模型 Key 的用户配置（single-machine BYOK）
+data/settings.json
+data/settings.json.bak
 
-# 用户上传的原始文件与导出物（版权 + 体积）
+# ── 用户上传的原始文件与导出物（版权 + 体积）────────────
 data/uploads/
 data/exports/
 
-# 教材与参考资料（版权，且体积大）
+# ── 教材与课程资料：绝不入库，由使用者自行获取 ──────────
+# 两个来源：data/corpus/（建库原料）与 课程/<简称>/（用户投放的 PDF/DOCX/PPT）。
+# 分发方式见 README 第八节：教材库用 pack/fetch:textbook，
+# 课程原始资料由使用者按 课程/<简称>/下载.json 自己下（npm run fetch:materials）。
 data/corpus/
 大学物理下/
+课程/
 
-# 杂项
+# ── 杂项 ──────────────────────────────────────────────
 *.log
 .DS_Store
 Thumbs.db
+.dev.err
+data/tmp-*

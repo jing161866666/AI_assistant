@@ -1,0 +1,30 @@
+#!/bin/sh
+# 提交前守卫：只跑「快且确定」的两项（约 10 秒）。
+#
+# 为什么不在这里跑完整 npm run check：测试套件会真实调用模型（约 2-3 分钟，
+# 且依赖网络与配额），把它塞进每次提交会逼着人用 --no-verify 绕过，最后等于没有守卫。
+# 完整检查（lint + typecheck + 11 套测试）在 push 前手动跑一次。
+#
+# 启用方式（每个克隆执行一次）：
+#   git config core.hooksPath .githooks
+
+set -e
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+echo "[pre-commit] biome check ..."
+if ! npm run lint --silent; then
+  echo ""
+  echo "✗ lint 未通过。多数情况可以直接修：npm run lint:fix" 2>/dev/null || true
+  echo "  或手动执行：npx biome check --write src scripts web/src"
+  exit 1
+fi
+
+echo "[pre-commit] tsc --noEmit ..."
+if ! npm run typecheck --silent; then
+  echo ""
+  echo "✗ 类型检查未通过。先修类型错误再提交。"
+  exit 1
+fi
+
+echo "[pre-commit] ok"
