@@ -1048,3 +1048,424 @@ sup.cite {
   color: #92400e;
   line-height: 1.7;
 }
+
+/* ── M1：日程表增删改（表单 / 可点击时间块）────────────── */
+.blk {
+  position: relative;
+}
+.blk.editable {
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  border-width: 0 0 0 3px;
+  border-style: solid;
+  cursor: pointer;
+}
+.blk.editable:hover {
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.22);
+}
+.blk .edt {
+  position: absolute;
+  right: 4px;
+  top: 2px;
+  font-size: 10px;
+  color: currentColor;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.blk.editable:hover .edt {
+  opacity: 0.55;
+}
+.blk .exflag {
+  position: absolute;
+  right: 5px;
+  top: 2px;
+  font-size: 9.5px;
+  color: #b45309;
+  background: #fff7ed;
+  border-radius: 4px;
+  padding: 0 3px;
+}
+
+.foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.foot .addbtn {
+  border: none;
+  background: none;
+  color: var(--academic);
+  font-size: 11px;
+  padding: 0;
+  cursor: pointer;
+}
+.foot .addbtn:hover {
+  text-decoration: underline;
+}
+
+.modalback {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  z-index: 60;
+}
+.modal {
+  background: #fff;
+  border-radius: 14px;
+  width: min(540px, 100%);
+  max-height: 90vh;
+  overflow: auto;
+  padding: 18px 20px 14px;
+  box-shadow: 0 22px 60px rgba(15, 23, 42, 0.28);
+}
+.modal h3 {
+  margin: 0 0 12px;
+  font-size: 15px;
+  color: var(--ink);
+}
+.formgrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 12px;
+}
+@media (max-width: 520px) {
+  .formgrid {
+    grid-template-columns: 1fr;
+  }
+}
+.formgrid label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #6b7280;
+}
+.formgrid label.span2 {
+  grid-column: 1 / -1;
+}
+.formgrid input,
+.formgrid select,
+.formgrid textarea {
+  font: inherit;
+  font-size: 13px;
+  color: #111827;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 6px 8px;
+  width: 100%;
+  box-sizing: border-box;
+}
+.formgrid input[type="time"],
+.formgrid input[type="date"] {
+  min-height: 32px;
+}
+.formgrid textarea {
+  min-height: 54px;
+  resize: vertical;
+  line-height: 1.55;
+}
+.seg {
+  display: inline-flex;
+  gap: 6px;
+}
+.seg button {
+  border: 1px solid var(--line);
+  background: #fff;
+  color: #374151;
+  border-radius: 7px;
+  padding: 5px 11px;
+  font-size: 12.5px;
+}
+.seg button.on {
+  border-color: var(--academic);
+  color: var(--academic);
+  background: #eff6ff;
+}
+.segin {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.segin input {
+  width: 62px;
+}
+.segin .tilde {
+  color: #9aa3b0;
+}
+.formfoot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.formfoot .grow {
+  flex: 1;
+}
+.formfoot button {
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink);
+  border-radius: 8px;
+  padding: 7px 14px;
+  font-size: 13px;
+}
+.formfoot button.primary {
+  background: var(--academic);
+  border-color: var(--academic);
+  color: #fff;
+}
+.formfoot button.danger {
+  color: #b91c1c;
+  border-color: #fecaca;
+}
+.formfoot button.danger:hover:not(:disabled) {
+  background: #fef2f2;
+}
+.formerr {
+  margin: 10px 0 0;
+}
+.formhint {
+  margin: 10px 0 0;
+  font-size: 11.5px;
+  color: #9aa3b0;
+  line-height: 1.6;
+}
+.formhint code {
+  font-size: 11px;
+  background: #f3f4f6;
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
+/* 越界提醒的"可能"档：比确定越界弱一档，不要吓人 */
+.beyond-soft {
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+.beyond-soft .bt {
+  color: #92400e;
+}
+.beyond-soft .bl {
+  color: #a16207;
+}
+
+/* 排期上限的紧凑输入框：别把顶端工具条撑太高 */
+.planbar .lim {
+  gap: 4px;
+}
+.planbar .lim input {
+  width: 54px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font: inherit;
+  font-size: 12.5px;
+  text-align: right;
+  color: var(--ink);
+}
+
+/* 错题卡上的科目徽标：同一列表里能看出这道题属于哪门课 */
+.tag.subj {
+  background: #eef2ff;
+  color: #3730a3;
+}
+
+/* ── 多科目：科目卡片 / 加科目表单 / 错题分组 ────────── */
+.subjgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.subjcard {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: #fcfdfe;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  cursor: pointer;
+  margin: 0;
+}
+.subjcard:hover {
+  border-color: var(--academic);
+}
+.subjcard.cur {
+  border-color: var(--academic);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.14);
+}
+.subjcard header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.subjcard .stats {
+  margin: 2px 0 0;
+}
+.subjcard .warn {
+  color: var(--work);
+}
+.subjcard footer {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.formrow {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  margin: 10px 0;
+}
+.formrow .inline.grow {
+  flex: 1 1 220px;
+}
+.formrow .inline.grow input {
+  width: 100%;
+}
+
+.okbox {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  color: #166534;
+}
+
+.mistakegroups {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.mkgroup {
+  border-top: 1px dashed var(--line);
+  padding-top: 10px;
+}
+.mkgroup h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 13.5px;
+}
+
+/* ── 首次设置：课表导入 ─────────────────────────────── */
+.setupoverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 6vh 16px;
+  z-index: 50;
+  overflow-y: auto;
+}
+.setupbox {
+  width: min(860px, 100%);
+  max-height: 88vh;
+  overflow-y: auto;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.25);
+}
+.setuptable {
+  margin-top: 10px;
+  overflow-x: auto;
+}
+.setuptable table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.setuptable th,
+.setuptable td {
+  border-bottom: 1px solid var(--line);
+  padding: 6px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+.setuptable th {
+  color: var(--muted);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* 错题本：优先显示用户上传的截图 */
+.mkimgwrap {
+  display: block;
+  margin: 8px 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  overflow: hidden;
+  background: #fafafa;
+  max-width: 420px;
+}
+.mkimgwrap:hover {
+  border-color: var(--academic);
+}
+.mkimg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+/* 截图题目的说明行：比题干弱一档（用更高优先级，避免 !important） */
+.mk .mkq.mkcaption {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 400;
+}
+.mkbody .md {
+  font-size: 13px;
+}
+
+/* 错题本：没有原图时的提示 + 补传入口 */
+.mknoimg {
+  font-size: 11.5px;
+  color: #b45309;
+  background: #fffbeb;
+  border: 1px dashed #fde68a;
+  border-radius: 7px;
+  padding: 5px 9px;
+  margin: 4px 0 6px;
+}
+.acts .mkupload {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 5px 10px;
+  font-size: 12.5px;
+  color: var(--ink);
+  cursor: pointer;
+}
+.acts .mkupload:hover {
+  border-color: var(--academic);
+  color: var(--academic);
+}
+.mk .mkstem {
+  margin: 6px 0 2px;
+}
+
+/* 进度页：章节名（来自知识库 chapter.title） */
+.chap .chapname {
+  font-style: normal;
+  font-size: 10px;
+  line-height: 1.2;
+  color: #64748b;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

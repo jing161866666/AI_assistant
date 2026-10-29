@@ -4,6 +4,7 @@ import BeyondNotice from "../components/BeyondNotice.tsx";
 import ImageInput from "../components/ImageInput.tsx";
 import MathText from "../components/MathText.tsx";
 import { useJobs } from "../jobs.tsx";
+import { useDraft, useKept } from "../persist.ts";
 import type { AskResponse } from "../types.ts";
 
 const JOB_ID = "ask";
@@ -15,9 +16,17 @@ const EXAMPLES = [
   "光电效应的截止频率和遏止电压怎么算？",
 ];
 
-export default function Ask() {
-  const [q, setQ] = useState("");
-  const [images, setImages] = useState<string[]>([]);
+export default function Ask({
+  course,
+  onPickCourse,
+}: {
+  course: string;
+  /** 模型判成别的科目时，允许用户一键切过去（检索会换成那科的教材库） */
+  onPickCourse?: (code: string) => void;
+}) {
+  // 输入不随切页签/关页面消失：题目文字进 localStorage，图片只保留在内存
+  const [q, setQ, clearQ, qRestored] = useDraft("ask.question", "");
+  const [images, setImages] = useKept<string[]>("ask.images", []);
   const [localErr, setLocalErr] = useState<string | null>(null);
 
   // 与改错页共用同一套后台任务机制：切页面不中断、结果不丢
@@ -34,7 +43,7 @@ export default function Ask() {
       return;
     }
     setLocalErr(null);
-    jobs.run(JOB_ID, "问答", () => api.ask(question, images));
+    jobs.run(JOB_ID, "问答", () => api.ask(question, images, course));
   };
 
   return (
@@ -50,9 +59,26 @@ export default function Ask() {
         <ImageInput
           kind="question"
           label="题目图片"
+          storageKey="ask"
           onImages={setImages}
           onText={(t) => setQ((prev) => (prev.trim() ? `${t}\n\n${prev}` : t))}
         />
+
+        {qRestored && q.trim().length > 0 && (
+          <p className="imgnote">
+            已恢复上次没发出去的输入（存在本机浏览器里）。
+            <button
+              type="button"
+              className="link"
+              onClick={() => {
+                clearQ();
+                setImages(() => []);
+              }}
+            >
+              清空
+            </button>
+          </p>
+        )}
 
         <textarea
           value={q}
@@ -96,7 +122,31 @@ export default function Ask() {
       {res && (
         <section className="panel">
           <h2>回答</h2>
-          <BeyondNotice beyond={res.beyond} maxChapterNo={res.maxChapterNo} />
+          {res.subject?.mismatch && res.subject.code && (
+            <div className="alert">
+              ⚠ {res.subject.reason}。当前检索用的是《{course}》的教材库，
+              {res.subject.name && onPickCourse ? (
+                <>
+                  {" "}
+                  切到《{res.subject.name}》再问，才会用那科的资料：
+                  <button
+                    type="button"
+                    className="link"
+                    onClick={() => onPickCourse(res.subject!.code!)}
+                  >
+                    切过去
+                  </button>
+                </>
+              ) : (
+                "建议先在「科目」页勾选该科目。"
+              )}
+            </div>
+          )}
+          <BeyondNotice
+            beyond={res.beyond}
+            uncertain={res.uncertain}
+            maxChapterNo={res.maxChapterNo}
+          />
           <MathText text={res.answer} />
           {res.citations.length > 0 && (
             <>

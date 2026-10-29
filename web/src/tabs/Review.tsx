@@ -1,11 +1,12 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api.ts";
 import BeyondNotice from "../components/BeyondNotice.tsx";
 import ImageInput from "../components/ImageInput.tsx";
 import MathText from "../components/MathText.tsx";
 import { useJobs } from "../jobs.tsx";
+import { useDraft, useKept } from "../persist.ts";
 import { runStream, type StreamResult } from "../stream.ts";
-import type { BankMatch } from "../types.ts";
+import type { BankMatch, StoredTurn } from "../types.ts";
 
 const VERDICT: Record<string, { label: string; cls: string }> = {
   correct: { label: "答对了", cls: "v-ok" },
@@ -37,6 +38,35 @@ const INPUT_KIND_LABEL: Record<string, string> = {
 /** 后台任务 id：切页面不丢结果，靠它取回 */
 const JOB_ID = "review";
 
+/** 每个科目记一条"上一轮结果"的本地指针，刷新后据此从库里读回 */
+const turnKey = (course: string): string => `ai-study.lastTurn.${course}`;
+
+/** 库里的一轮 → 界面用的结果结构（刷新恢复时用） */
+function turnToResult(t: StoredTurn): StreamResult {
+  const g = t.meta.grade;
+  return {
+    mode: t.meta.kind === "grade" ? "grade" : "solve",
+    source: t.meta.source as StreamResult["source"],
+    bank: t.meta.bank ?? null,
+    citations: [],
+    model: t.meta.model,
+    ms: t.meta.ms,
+    grade: g
+      ? {
+          verdict: g.verdict as "correct" | "partially" | "wrong" | "unsolved",
+          input_kind: g.input_kind as "answer" | "process" | "question" | "empty" | "unknown",
+          error_type: g.error_type,
+          cause: g.cause,
+          correction: t.answer,
+          hints: g.hints,
+          related_kps: g.related_kps,
+        }
+      : undefined,
+    text: t.answer,
+    notes: [],
+  };
+}
+
 /** 题库来源标签：让用户一眼看出这道题的答案是不是题库原文 */
 function bankTag(source?: string, bank?: BankMatch | null): string | null {
   if (!source) return null;
@@ -50,15 +80,18 @@ function bankTag(source?: string, bank?: BankMatch | null): string | null {
   return "题库未收录 · 模型自解";
 }
 
-export default function Review({ onSaved }: { onSaved: () => void }) {
-  const [question, setQuestion] = useState("");
-  const [myAnswer, setMyAnswer] = useState("");
-  const [images, setImages] = useState<string[]>([]);
-  const [answerImages, setAnswerImages] = useState<string[]>([]);
+export default function Review({ course, onSaved }: { course: string; onSaved: () => void }) {
+  // 切页签/关页面都不该把已输入的题目与作答弄丢
+  const [question, setQuestion, clearQuestion, questionRestored] = useDraft("review.question", "");
+  const [myAnswer, setMyAnswer, clearMyAnswer] = useDraft("review.myAnswer", "");
+  const [images, setImages] = useKept<string[]>("review.images", []);
+  const [answerImages, setAnswerImages] = useKept<string[]>("review.answerImages", []);
   /** full = 逐步详细推导；brief = 用户主动选的精简版，省时间 */
-  const [detail, setDetail] = useState<"full" | "brief">("full");
+  const [detail, setDetail] = useKept<"full" | "brief">("review.detail", "full");
   const [localErr, setLocalErr] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  /** 模型判成别的科目时，默认存到那个科目；这个开关让用户改回当前科目 */
+  const [saveToCurrent, setSaveToCurrent] = useState(false);
   /** 题目图和作答图都在本页，Ctrl+V 只能粘到一个，用最后聚焦的那一栏作为目标 */
   const [pasteTarget, setPasteTarget] = useState<"question" | "answer">("question");
 
@@ -70,6 +103,29 @@ export default function Review({ onSaved }: { onSaved: () => void }) {
   const res = job?.status === "done" ? (job.result ?? null) : null;
   const live = job?.result ?? null;
   const err = localErr ?? (job?.status === "error" ? (job.error ?? "请求失败") : null);
+  /** 从库里恢复过结果没有（每个科目只试一次） */
+  const restoredFor = useRef<string | null>(null);
+
+  // 刷新页面后：内存里的 jobs 没了，但库里有上一轮 → 读回来重新渲染
+  useEffect(() => {
+    if (job || restoredFor.current === course) return;
+    const saved = localStorage.getItem(turnKey(course));
+    if (!saved) return;
+    restoredFor.current = course;
+    let alive = true;
+    void (async () => {
+      try {
+        const r = await api.turn(Number(saved));
+        if (alive) jobs.restore(JOB_ID, "上次结果", turnToResult(r.turn));
+      } catch {
+        // 库被清过或记录不存在：丢掉指针，别每次刷新都撞一次 404
+        localStorage.removeItem(turnKey(course));
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [course, job, jobs]);
 
   const submit = (): void => {
     if (!question.trim() && images.length === 0) {
@@ -78,6 +134,7 @@ export default function Review({ onSaved }: { onSaved: () => void }) {
     }
     setLocalErr(null);
     setSaved(false);
+    setSaveToCurrent(false);
     jobs.run(JOB_ID, myAnswer.trim() || answerImages.length ? "批改" : "解题", (patch) =>
       runStream(
         {
@@ -86,24 +143,41 @@ export default function Review({ onSaved }: { onSaved: () => void }) {
           images,
           answerImages,
           detail,
+          course,
         },
         // 流式增量写进任务表：切页面回来还能看到已生成的部分
-        (acc) => patch({ result: acc }),
+        (acc) => {
+          // 记下这一轮的 id：刷新后用它从本地库恢复
+          if (acc.turn) localStorage.setItem(turnKey(course), String(acc.turn.messageId));
+          patch({ result: acc });
+        },
       ),
     );
   };
 
   const save = async (): Promise<void> => {
     if (!res) return;
+    // 有确定的科目就存那科；判不出就存成「未归类」，并记下模型的预测名（便于以后认领）
+    const target =
+      res.subject?.mismatch && res.subject.code && !saveToCurrent
+        ? res.subject.code
+        : res.subject?.code && !saveToCurrent
+          ? (res.subject.code ?? undefined)
+          : course || undefined;
     try {
       await api.saveMistake({
         title: (question || "图片题").slice(0, 200),
+        course: target,
+        predictedCourse: target ? undefined : (res.subject?.raw ?? ""),
         raw_text: question,
         my_answer: myAnswer,
         correct_answer: res.text,
         error_type: res.grade?.error_type ?? "none",
         error_detail: res.grade?.cause ?? "",
         kp_codes: res.grade?.related_kps ?? [],
+        // 题目原图优先：错题本要能显示用户自己的截图，而不是只有我们转录的文字。
+        // 只存题目图，不存作答图——作答图展示的会是学生的草稿，容易被当成题干。
+        images,
       });
       setSaved(true);
       onSaved();
@@ -117,6 +191,11 @@ export default function Review({ onSaved }: { onSaved: () => void }) {
   const isGrade = view?.mode === "grade";
   const grade = view?.grade;
   const tag = bankTag(view?.source, view?.bank);
+  /** 模型判成了别的已勾选科目：提示 + 默认存到那科 */
+  const route = view?.subject;
+  /** 模型判不出属于哪门勾选科目：只作答，不写入错题本 */
+  const unclassified = !!route && route.code == null;
+  const mismatch = route?.mismatch && route.code ? route : null;
   const hintTag =
     isGrade && grade?.verdict === "unsolved" && grade.input_kind !== "unknown"
       ? `已识别为：${INPUT_KIND_LABEL[grade.input_kind] ?? grade.input_kind}`
@@ -143,6 +222,7 @@ export default function Review({ onSaved }: { onSaved: () => void }) {
           <ImageInput
             kind="question"
             label="题目图片"
+            storageKey="review.question"
             active={pasteTarget === "question"}
             onActivate={() => setPasteTarget("question")}
             onImages={setImages}
@@ -165,6 +245,7 @@ export default function Review({ onSaved }: { onSaved: () => void }) {
           <ImageInput
             kind="answer"
             label="手写作答图片"
+            storageKey="review.answer"
             active={pasteTarget === "answer"}
             onActivate={() => setPasteTarget("answer")}
             onImages={setAnswerImages}
@@ -179,6 +260,24 @@ export default function Review({ onSaved }: { onSaved: () => void }) {
             placeholder="最终答案、半截推导、或者一句「这一步为什么」都可以；留空即只解题"
           />
         </label>
+
+        {questionRestored && (question.trim() || myAnswer.trim()) && (
+          <p className="imgnote">
+            已恢复上次没提交的输入（存在本机浏览器里）。
+            <button
+              type="button"
+              className="link"
+              onClick={() => {
+                clearQuestion();
+                clearMyAnswer();
+                setImages(() => []);
+                setAnswerImages(() => []);
+              }}
+            >
+              清空
+            </button>
+          </p>
+        )}
 
         <div className="row">
           <span className="seg">
@@ -224,13 +323,27 @@ export default function Review({ onSaved }: { onSaved: () => void }) {
             {hintTag && <span className="tag">{hintTag}</span>}
             {!isGrade && tag && <span className="tag">{tag}</span>}
             {view.degraded && <span className="tag">本次未拿到结构化判定</span>}
+            {job?.label === "上次结果" && <span className="tag">已从本地库恢复上次结果</span>}
             <span className="meta">
               {view.model} {view.ms != null ? `· ${(view.ms / 1000).toFixed(1)}s` : ""}
               {busy ? " · 生成中" : ""}
             </span>
           </div>
 
-          <BeyondNotice beyond={view.beyond} maxChapterNo={view.maxChapterNo} />
+          <BeyondNotice
+            beyond={view.beyond}
+            uncertain={view.uncertain}
+            maxChapterNo={view.maxChapterNo}
+          />
+
+          {mismatch && (
+            <div className="alert">
+              ⚠ {mismatch.reason}。存错题默认归到《{mismatch.name}》。
+              <button type="button" className="link" onClick={() => setSaveToCurrent((v) => !v)}>
+                {saveToCurrent ? `改回存到《${mismatch.name}》` : `其实是当前科目（${course}）的题`}
+              </button>
+            </div>
+          )}
 
           {view.notes.map((n) => (
             <div className="alert" key={n}>
@@ -294,14 +407,26 @@ export default function Review({ onSaved }: { onSaved: () => void }) {
           )}
 
           <div className="row">
-            <button
-              type="button"
-              className="primary"
-              onClick={() => void save()}
-              disabled={saved || busy}
-            >
-              {saved ? "已存入错题本 ✓" : "存入错题本"}
-            </button>
+            {unclassified ? (
+              // 判不出属于哪门勾选科目：只作答，明确告诉用户不会入库
+              <p className="hint">
+                这道题不属于你勾选的科目：本次只作答，<b>不会存入错题本</b>。
+                如果是同一门课，先去「科目」页把它加上/勾选再重试。
+              </p>
+            ) : (
+              <button
+                type="button"
+                className="primary"
+                onClick={() => void save()}
+                disabled={saved || busy}
+              >
+                {saved
+                  ? "已存入错题本 ✓"
+                  : mismatch && !saveToCurrent
+                    ? `存入《${mismatch.name}》错题本`
+                    : "存入错题本"}
+              </button>
+            )}
           </div>
         </section>
       )}

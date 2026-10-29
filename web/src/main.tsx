@@ -2,6 +2,7 @@ import { Component, type ErrorInfo, type ReactNode, StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "katex/dist/katex.min.css";
 import App from "./App.tsx";
+import { JobsProvider } from "./jobs.tsx";
 import "./styles.css";
 
 /**
@@ -44,7 +45,9 @@ if (!root) throw new Error("缺少 #root 节点");
 createRoot(root).render(
   <StrictMode>
     <ErrorBoundary>
-      <App />
+      <JobsProvider>
+        <App />
+      </JobsProvider>
     </ErrorBoundary>
   </StrictMode>,
 );
