@@ -30,16 +30,64 @@ CREATE TABLE IF NOT EXISTS consent (
   note        TEXT
 );
 
--- ── 选课：指向 textbook.db 文件，记录其版本 ─────────────────
+-- ── 选课：科目注册表，指向该科目的教材库文件，记录其版本 ─────
+-- 这是"增加科目"的唯一入口：科目先登记，知识库由 build:textbook 单独构建。
+-- 记忆（进度/错题/习惯）仍按 course_code 存在本库；
+-- learner_file 预留给第二步"记忆也物理分库"，现在全部为 NULL = 用共享 learner.db。
 CREATE TABLE IF NOT EXISTS subject (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   course_code   TEXT NOT NULL UNIQUE,
   course_name   TEXT NOT NULL,
-  textbook_file TEXT,             -- 如 course-ds-2025.db
+  textbook_file TEXT,             -- 如 course-ds-2025.db；NULL = 知识库尚未构建
   textbook_ver  TEXT,             -- 对应 textbook.meta['version']
+  learner_file  TEXT,             -- 预留：该科目独立记忆库文件名；NULL = 共享 learner.db
+  note          TEXT,             -- 备注（学号/教材版本/先验知识待补）
+  -- 用户是否勾选"允许 AI 辅助这门课"。候选科目来自课程表，用户逐一勾选授权；
+  -- qwen 只能在 ai_enabled=1 的科目里选一个最可能的，不能自己扩大范围。
+  ai_enabled    INTEGER NOT NULL DEFAULT 0,
   selected_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at    TEXT,
   active        INTEGER NOT NULL DEFAULT 1
 );
+
+-- ── 课名别名：课表官方名 ↔ 教材库 course.code 的对照 ──────────
+-- 为什么需要这张表：课表里写「大学物理(B)II」，库里 code 是 PHY2，
+-- 中间这层对应关系不能靠模型每次现猜（猜错就会拿错教材且看不出来）。
+-- 只信三种来源：exact（归一化后完全匹配，代码判定）、
+-- user（用户点过确认）、model（模型猜的，status 必须先是 pending）。
+CREATE TABLE IF NOT EXISTS course_alias (
+  alias       TEXT NOT NULL,               -- 课表里的课程名（原文，不归一化）
+  course_code TEXT NOT NULL,               -- 教材库自报的 course.code
+  source      TEXT NOT NULL DEFAULT 'model',  -- exact / user / model
+  status      TEXT NOT NULL DEFAULT 'pending',-- confirmed / pending / rejected
+  confidence  REAL,
+  reason      TEXT,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at  TEXT,
+  PRIMARY KEY (alias, course_code)
+);
+CREATE INDEX IF NOT EXISTS idx_alias_code ON course_alias(course_code);
+
+-- ── 课程资源：正在看的网课 / 在用的教辅（需求：自主输入学习习惯） ──
+-- 不塞进 habit 的原因：资源有 URL、有"本地有没有"、有"看到第几讲"，
+-- 用 key/value 会糊成一句话，排期时用不上。
+-- course_code 为 NULL = 通识资源（所有科目共用）。
+CREATE TABLE IF NOT EXISTS course_resource (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  course_code  TEXT,
+  kind         TEXT NOT NULL,        -- netcourse / guidebook / textbook / other
+  title        TEXT NOT NULL,
+  url          TEXT,
+  -- available=本地/线上已有可直接用 | missing=缺，待上传 | uploaded=已上传 | unknown
+  local_status TEXT NOT NULL DEFAULT 'unknown',
+  progress     REAL,                 -- 0-1：看到第几讲 / 用到哪一章
+  note         TEXT,
+  source       TEXT NOT NULL DEFAULT 'user',
+  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at   TEXT,
+  UNIQUE(course_code, kind, title)
+);
+CREATE INDEX IF NOT EXISTS idx_resource_course ON course_resource(course_code);
 
 -- ── 学习习惯：维度化存储，一行一个维度值 ────────────────────
 -- 维度建议：code_style / error_pattern / planning / attention_span
@@ -61,6 +109,8 @@ CREATE TABLE IF NOT EXISTS habit (
   context        TEXT,                 -- 补充场景（章节名、题型、时段）
   confidence     REAL NOT NULL DEFAULT 0.5,   -- 0-1，证据越多越接近 1
   evidence_count INTEGER NOT NULL DEFAULT 0,
+  status         TEXT NOT NULL DEFAULT 'active',  -- active / rejected（用户否决后永不注入）
+  source         TEXT NOT NULL DEFAULT 'model',   -- model / manual
   first_seen_at  TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -244,9 +294,12 @@ CREATE TABLE IF NOT EXISTS goal (
 );
 
 -- ── 学习路径：由目标 + 现有基础 + 日程共同生成 ───────────────
+-- course_codes 是 JSON 数组：一条路径可以联合多个科目（如「物理第12章 + 高数第3章」）。
+-- 单科目路径就是长度 1 的数组；具体某一条属于哪科，看 roadmap_item.course_code。
 CREATE TABLE IF NOT EXISTS roadmap (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   goal_id     INTEGER REFERENCES goal(id) ON DELETE CASCADE,
+  course_codes TEXT,              -- JSON 数组：本路径覆盖的科目
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   model       TEXT,
   summary     TEXT,
@@ -259,6 +312,7 @@ CREATE TABLE IF NOT EXISTS roadmap_item (
   roadmap_id    INTEGER NOT NULL REFERENCES roadmap(id) ON DELETE CASCADE,
   seq           INTEGER NOT NULL,
   title         TEXT NOT NULL,
+  course_code   TEXT,             -- 这一条属于哪一科；跨科目路径必须填
   kp_codes      TEXT,             -- JSON 数组
   est_minutes   INTEGER,
   scheduled_date TEXT,            -- 分配到日程的具体日期
@@ -268,6 +322,8 @@ CREATE TABLE IF NOT EXISTS roadmap_item (
 );
 CREATE INDEX IF NOT EXISTS idx_ri_roadmap ON roadmap_item(roadmap_id);
 CREATE INDEX IF NOT EXISTS idx_ri_date    ON roadmap_item(scheduled_date);
+-- idx_ri_course 不写在这里：老库的 roadmap_item 还没有 course_code 列，
+-- schema 整体 exec 会在 ALTER 之前建索引而失败。见 src/db/migrate.ts 的 POST_MIGRATION_INDEXES。
 
 
 -- ── 章节进度：连续过程学习的核心 ────────────────────────────
@@ -288,6 +344,18 @@ CREATE TABLE IF NOT EXISTS chapter_progress (
   UNIQUE(course_code, chapter_no)
 );
 CREATE INDEX IF NOT EXISTS idx_chprog_course ON chapter_progress(course_code);
+
+-- ── 章节名称覆盖：用户可按"市面上约定俗成的叫法"改名 ──────────
+-- 为什么单独一张表而不是改 textbook.db：教材库只读、全校共享，
+-- 一个学生改名不能影响别人；覆盖只作用于本机，合并后喂给模型与界面。
+CREATE TABLE IF NOT EXISTS chapter_name (
+  course_code TEXT NOT NULL,
+  chapter_no  INTEGER NOT NULL,
+  title       TEXT NOT NULL,
+  source      TEXT NOT NULL DEFAULT 'user',   -- user / import
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (course_code, chapter_no)
+);
 -- ── 错题本：error_type 是教师端归因分析的核心字段 ───────────
 CREATE TABLE IF NOT EXISTS mistake (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,

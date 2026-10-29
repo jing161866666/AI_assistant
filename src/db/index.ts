@@ -7,7 +7,9 @@ export const ROOT = process.cwd();
 
 export const paths = {
   data: resolve(ROOT, "data"),
-  textbook: resolve(ROOT, "data/textbook"),
+  // 测试用 TEXTBOOK_DIR 指到临时目录：否则测试建的 course-*.db 会被正在运行的服务
+  // 自动登记成科目（真实污染），这条踩过坑。
+  textbook: resolve(ROOT, process.env.TEXTBOOK_DIR ?? "data/textbook"),
   uploads: resolve(ROOT, "data/uploads"),
   exports: resolve(ROOT, "data/exports"),
   learnerDb: resolve(ROOT, process.env.DB_PATH ?? "./data/learner.db"),

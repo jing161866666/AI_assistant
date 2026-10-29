@@ -26,11 +26,24 @@ const MIGRATIONS: ColumnSpec[] = [
   { table: "schedule", column: "locked", ddl: "INTEGER NOT NULL DEFAULT 0" },
   // 学习路径条目：指回具体日程块
   { table: "roadmap_item", column: "schedule_id", ddl: "INTEGER" },
+  // 学习路径的科目维度：一条路径可以联合多个科目，所以两端都要记
+  //   roadmap.course_codes  = JSON 数组，路径覆盖了哪几科
+  //   roadmap_item.course_code = 这一条属于哪一科（排期/门控/检索都按它走）
+  { table: "roadmap", column: "course_codes", ddl: "TEXT" },
+  { table: "roadmap_item", column: "course_code", ddl: "TEXT" },
   // 学习习惯：从「一维一值」升级为「可作用于某科目/某场景」
   { table: "habit", column: "course_code", ddl: "TEXT" },
   { table: "habit", column: "context", ddl: "TEXT" },
   { table: "habit", column: "status", ddl: "TEXT NOT NULL DEFAULT 'active'" },
   { table: "habit", column: "source", ddl: "TEXT NOT NULL DEFAULT 'model'" },
+  // 科目注册表：增加科目时用到的软字段（老库补列，新库由 schema.sql 建好）
+  { table: "subject", column: "learner_file", ddl: "TEXT" },
+  { table: "subject", column: "note", ddl: "TEXT" },
+  { table: "subject", column: "updated_at", ddl: "TEXT" },
+  // 用户逐个勾选"允许 AI 辅助"的科目；默认 0 = 未授权，必须显式勾
+  { table: "subject", column: "ai_enabled", ddl: "INTEGER NOT NULL DEFAULT 0" },
+  // 错题按科目归类展示需要稳定的科目列；老库可能没有（schema 只对新库生效）
+  { table: "mistake", column: "course_code", ddl: "TEXT" },
 ];
 
 /**
@@ -38,11 +51,18 @@ const MIGRATIONS: ColumnSpec[] = [
  * 写不进 schema.sql：老库表结构缺列时，schema 整体 exec 会在 ALTER 之前建索引而失败。
  * 放在这里，新库与老库走同一条路径，不会漏。
  */
-const POST_MIGRATION_INDEXES: Array<{ name: string; ddl: string }> = [
+const POST_MIGRATION_INDEXES: Array<{ name: string; table: string; ddl: string }> = [
   {
     name: "uq_habit",
+    table: "habit",
     ddl: `CREATE UNIQUE INDEX IF NOT EXISTS uq_habit
           ON habit(dimension, key, COALESCE(course_code, ''), COALESCE(context, ''))`,
+  },
+  {
+    // 学习路径按科目查：跨科目路径要能按 course_code 过滤每条 item
+    name: "idx_ri_course",
+    table: "roadmap_item",
+    ddl: "CREATE INDEX IF NOT EXISTS idx_ri_course ON roadmap_item(course_code)",
   },
 ];
 
@@ -156,7 +176,7 @@ export function migrate(db: DatabaseSync): MigrationReport {
   // 列补全后再建索引。唯一索引可能因老数据重复而失败，
   // 此时不能让整个启动流程挂掉：记一条报告，交给人工清理。
   for (const idx of POST_MIGRATION_INDEXES) {
-    if (!hasTable(db, "habit")) continue;
+    if (!hasTable(db, idx.table)) continue;
     try {
       db.exec(idx.ddl);
     } catch (e) {
