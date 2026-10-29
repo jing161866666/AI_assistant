@@ -26,8 +26,27 @@ $Base = 'https://tommy.seu.edu.cn/filebrowser'
 $Root = Split-Path $PSScriptRoot -Parent
 $TokenFile = Join-Path $Root '.fb_token'
 
+# Credentials are NOT hardcoded here (this file is tracked by git).
+# They live in .env as FB_USER / FB_PASS (gitignored), or in the environment.
+function Get-FbCred {
+  $u = $env:FB_USER
+  $p = $env:FB_PASS
+  $envFile = Join-Path $Root '.env'
+  if ((-not $u -or -not $p) -and (Test-Path $envFile)) {
+    foreach ($line in Get-Content $envFile) {
+      if ($line -match '^\s*FB_USER\s*=\s*(.+?)\s*$') { $u = $Matches[1] }
+      elseif ($line -match '^\s*FB_PASS\s*=\s*(.+?)\s*$') { $p = $Matches[1] }
+    }
+  }
+  if (-not $u -or -not $p) {
+    throw 'missing credentials: add FB_USER / FB_PASS to .env'
+  }
+  return @{ user = $u; pass = $p }
+}
+
 function New-Token {
-  $body = '{"username":"JS1257","password":"JS1257dl"}'
+  $c = Get-FbCred
+  $body = @{ username = $c.user; password = $c.pass } | ConvertTo-Json -Compress
   $tmp = Join-Path $env:TEMP "fb_login_$PID.json"
   [System.IO.File]::WriteAllText($tmp, $body, (New-Object System.Text.UTF8Encoding($false)))
   try {
